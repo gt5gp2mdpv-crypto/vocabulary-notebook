@@ -572,8 +572,16 @@ p {
   background: var(--surface-2);
 }
 
+.file-drawer {
+  position: relative;
+}
+
 .file-drawer input {
-  display: none;
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  overflow: hidden;
 }
 
 /* ===== 単語帳カード ===== */

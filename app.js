@@ -236,12 +236,13 @@ function renderDeckList() {
   }
   list.className = "deck-grid";
   list.innerHTML = App.decks.map((deck) => {
-    const avg = deck.avgScore != null ? deck.avgScore.toFixed(2) : "-";
+    const avg = deck.avgScore != null ? Number(deck.avgScore).toFixed(2) : "-";
+    const wc = deck.wordCount != null ? deck.wordCount : "-";
     return `
       <div class="deck-card" data-id="${esc(deck.id)}">
         <div class="deck-main">
           <button class="deck-open" type="button">${esc(deck.name)}
-            <span class="deck-count">${esc(deck.wordCount)}単語</span>
+            <span class="deck-count">${esc(wc)}単語</span>
           </button>
           <div class="deck-actions">
             <button class="mini-button" data-act="rename" type="button">名前変更</button>
@@ -271,17 +272,17 @@ function bindDeckList() {
 }
 
 async function openDeck(deckId) {
-  const deck = App.decks.find((d) => d.id === deckId);
+  const deck = App.decks.find((d) => String(d.id) === String(deckId));
   if (!deck) return;
   App.currentDeck = deck;
-  App.currentWords = await db.getAllByIndex(STORE_WORDS, "deckId", deckId);
+  App.currentWords = await db.getAllByIndex(STORE_WORDS, "deckId", deck.id);
   showScreen("deck");
   renderDeckStats();
   renderWordList();
 }
 
 async function renameDeck(deckId) {
-  const deck = App.decks.find((d) => d.id === deckId);
+  const deck = App.decks.find((d) => String(d.id) === String(deckId));
   if (!deck) return;
   const name = prompt("新しい単語帳名を入力してください", deck.name);
   if (name == null || name.trim() === "") return;
@@ -293,10 +294,12 @@ async function renameDeck(deckId) {
 
 async function deleteDeck(deckId) {
   if (!confirm("この単語帳と、含まれる単語をすべて削除しますか？")) return;
-  await db.del(STORE_DECKS, deckId);
-  await db.delByIndex(STORE_WORDS, "deckId", deckId);
-  await db.delByIndex(STORE_TESTS, "deckId", deckId);
-  delete App.cachedWords[deckId];
+  const deck = App.decks.find((d) => String(d.id) === String(deckId));
+  const realId = deck ? deck.id : deckId;
+  await db.del(STORE_DECKS, realId);
+  await db.delByIndex(STORE_WORDS, "deckId", realId);
+  await db.delByIndex(STORE_TESTS, "deckId", realId);
+  delete App.cachedWords[String(realId)];
   loadDecks();
   showToast("単語帳を削除しました");
 }
@@ -333,21 +336,19 @@ function parseCSV(text) {
 }
 
 function decodeBuffer(buffer) {
+  // BOM付きUTF-8
   if (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
     return new TextDecoder("utf-8").decode(buffer.subarray(3));
   }
-  let hasNull = false;
-  for (let i = 0; i < buffer.length; i++) {
-    if (buffer[i] === 0) { hasNull = true; break; }
-  }
-  if (!hasNull) {
-    try { return new TextDecoder("utf-8").decode(buffer); }
-    catch (e) { /* fallthrough */ }
-  }
+  // まずUTF-8でフォールトレスデコード（無効バイトはU+FFFDへ）
+  const utf8 = new TextDecoder("utf-8", { fatal: false }).decode(buffer);
+  // U+FFFD(=不正バイト)が含まれないならそのままUTF-8
+  if (utf8.indexOf("\uFFFD") === -1) return utf8;
+  // 不正バイトあり → Shift_JISとして再デコード
   try {
     return new TextDecoder(ENC_SHIFT_JIS).decode(buffer);
   } catch (e) {
-    return new TextDecoder("utf-8").decode(buffer);
+    return utf8;
   }
 }
 
@@ -382,6 +383,9 @@ function handleCsvFiles(files) {
     renderImportPreview();
     $("importPreviewPanel").classList.remove("hidden");
     $("importPreviewPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+  }).catch((e) => {
+    console.error("CSV読み込みエラー:", e);
+    showToast("CSVの読み込みに失敗しました: " + (e && e.message ? e.message : e));
   });
 }
 
@@ -401,20 +405,25 @@ function renderImportPreview() {
 }
 
 async function confirmImport() {
-  for (const imp of pendingImports) {
-    const deckId = uid();
-    const deck = { id: deckId, name: imp.deckName, order: Date.now(), wordCount: imp.terms.length, avgScore: SCORE_INIT };
-    await db.put(STORE_DECKS, deck);
-    for (const t of imp.terms) {
-      await db.put(STORE_WORDS, { deckId, term: t.term, meaning: t.meaning, score: SCORE_INIT, tested: false });
+  try {
+    for (const imp of pendingImports) {
+      const deckId = uid();
+      const deck = { id: deckId, name: imp.deckName, order: Date.now(), wordCount: imp.terms.length, avgScore: SCORE_INIT };
+      await db.put(STORE_DECKS, deck);
+      for (const t of imp.terms) {
+        await db.put(STORE_WORDS, { deckId, term: t.term, meaning: t.meaning, score: SCORE_INIT, tested: false });
+      }
     }
+    const total = pendingImports.reduce((s, x) => s + x.terms.length, 0);
+    pendingImports = [];
+    $("importPreviewPanel").classList.add("hidden");
+    $("csvInput").value = "";
+    await loadDecks();
+    showToast(total + "語をインポートしました");
+  } catch (e) {
+    console.error("インポート保存エラー:", e);
+    showToast("保存に失敗しました: " + (e && e.message ? e.message : e));
   }
-  const total = pendingImports.reduce((s, x) => s + x.terms.length, 0);
-  pendingImports = [];
-  $("importPreviewPanel").classList.add("hidden");
-  $("csvInput").value = "";
-  await loadDecks();
-  showToast(total + "語をインポートしました");
 }
 
 /* -------------------------------------------------------------------------
@@ -475,7 +484,6 @@ function bindWordList() {
 }
 
 async function addNewWord(wordId) {
-  const word = {}; // 新規は未使用：単語編集はprompt2個
   if (wordId) {
     const w = App.currentWords.find((x) => String(x.id) === String(wordId));
     if (!w) return;
