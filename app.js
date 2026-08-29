@@ -1,782 +1,856 @@
+/* =========================================================================
+ * 単語帳 PWA - アプリケーション本体
+ * ========================================================================= */
 "use strict";
+
+/* -------------------------------------------------------------------------
+ * 定数
+ * ------------------------------------------------------------------------- */
+const APP_NAME = "単語帳";
+const APP_VERSION = "1.0.0";
+const BACKUP_VERSION = 2; // バックアップ形式のバージョン（アップデート対応）
 
 const DB_NAME = "vocab-pwa-db";
 const DB_VERSION = 1;
-const APP_SCHEMA_VERSION = 1;
-const BACKUP_VERSION = 1;
-const SCORE_MIN = 0.1;
-const SCORE_MAX = 5;
-const SCORE_DEFAULT = 1;
+const STORE_DECKS = "decks";
+const STORE_WORDS = "words";
+const STORE_META = "meta";
+const STORE_TESTS = "tests";
 
-const state = {
-  db: null,
-  decks: [],
-  cards: [],
-  currentDeck: null,
-  currentTab: "list",
-  pendingImports: [],
-  test: null,
-  timerId: null
+// 暗記スコア設定
+const SCORE_MIN = 0.10;
+const SCORE_MAX = 5.00;
+const SCORE_INIT = 1.0;
+
+// テストタイマー（秒）
+const TIME_OPEN_LIMIT = 15; // 1単語の開放制限時間
+const TIME_FORCE_QUIT = 30; // これを超えたらテスト自体を強制終了
+
+const ENC_UTF8 = "utf-8";
+const ENC_SHIFT_JIS = "shift-jis";
+
+/* -------------------------------------------------------------------------
+ * ユーティリティ
+ * ------------------------------------------------------------------------- */
+const $ = (id) => document.getElementById(id);
+
+function uid() {
+  return "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function clamp(n, min, max) {
+  return Math.min(max, Math.max(min, n));
+}
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+function showToast(msg, duration = 2600) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.classList.add("hidden"), duration);
+}
+
+/* -------------------------------------------------------------------------
+ * IndexedDB データ層
+ * ------------------------------------------------------------------------- */
+const db = {
+  _conn: null,
+
+  open() {
+    if (this._conn) return Promise.resolve(this._conn);
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (e) => {
+        const d = e.target.result;
+        if (!d.objectStoreNames.contains(STORE_DECKS)) {
+          d.createObjectStore(STORE_DECKS, { keyPath: "id" });
+        }
+        if (!d.objectStoreNames.contains(STORE_WORDS)) {
+          const s = d.createObjectStore(STORE_WORDS, { keyPath: "id", autoIncrement: true });
+          s.createIndex("deckId", "deckId", { unique: false });
+        }
+        if (!d.objectStoreNames.contains(STORE_META)) {
+          d.createObjectStore(STORE_META, { keyPath: "key" });
+        }
+        if (!d.objectStoreNames.contains(STORE_TESTS)) {
+          const s = d.createObjectStore(STORE_TESTS, { keyPath: "id", autoIncrement: true });
+          s.createIndex("deckId", "deckId", { unique: false });
+          s.createIndex("date", "date", { unique: false });
+        }
+      };
+      req.onsuccess = () => {
+        this._conn = req.result;
+        resolve(this._conn);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  },
+
+  getAll(store) {
+    return this.open().then((conn) =>
+      new Promise((res, rej) => {
+        const tx = conn.transaction(store, "readonly");
+        const r = tx.objectStore(store).getAll();
+        r.onerror = () => rej(r.error);
+        r.onsuccess = () => res(r.result);
+      })
+    );
+  },
+
+  getAllByIndex(store, indexName, value) {
+    return this.open().then((conn) =>
+      new Promise((res, rej) => {
+        const tx = conn.transaction(store, "readonly");
+        const r = tx.objectStore(store).index(indexName).getAll(IDBKeyRange.only(value));
+        r.onerror = () => rej(r.error);
+        r.onsuccess = () => res(r.result);
+      })
+    );
+  },
+
+  get(store, key) {
+    return this.open().then((conn) =>
+      new Promise((res, rej) => {
+        const tx = conn.transaction(store, "readonly");
+        const r = tx.objectStore(store).get(key);
+        r.onerror = () => rej(r.error);
+        r.onsuccess = () => res(r.result);
+      })
+    );
+  },
+
+  put(store, value) {
+    return this.open().then((conn) =>
+      new Promise((res, rej) => {
+        const tx = conn.transaction(store, "readwrite");
+        const r = tx.objectStore(store).put(value);
+        r.onerror = () => rej(r.error);
+        r.onsuccess = () => res(r.result);
+      })
+    );
+  },
+
+  del(store, key) {
+    return this.open().then((conn) =>
+      new Promise((res, rej) => {
+        const tx = conn.transaction(store, "readwrite");
+        tx.objectStore(store).delete(key);
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      })
+    );
+  },
+
+  delByIndex(store, indexName, value) {
+    return this.open().then((conn) =>
+      new Promise((res, rej) => {
+        const tx = conn.transaction(store, "readwrite");
+        const storeObj = tx.objectStore(store);
+        const keysReq = storeObj.index(indexName).getAllKeys(IDBKeyRange.only(value));
+        keysReq.onsuccess = () => {
+          keysReq.result.forEach((k) => storeObj.delete(k));
+        };
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      })
+    );
+  },
 };
 
-const el = {};
+/* -------------------------------------------------------------------------
+ * アプリ状態
+ * ------------------------------------------------------------------------- */
+const App = {
+  decks: [],           // 単語帳一覧
+  currentDeck: null,   // 表示中の単語帳
+  currentWords: [],    // 表示中の単語帳の単語
+  cachedWords: {},     // deckId -> words（テスト中の一時取得用にも）
+  sortMode: "order",
+};
 
-document.addEventListener("DOMContentLoaded", async () => {
-  bindElements();
-  bindEvents();
-  state.db = await openDb();
-  await refreshDecks();
-  showInitialNotice();
-  registerServiceWorker();
-});
+/* -------------------------------------------------------------------------
+ * 画面遷移
+ * ------------------------------------------------------------------------- */
+const SCREENS = { home: "homeScreen", deck: "deckScreen", backup: "backupScreen" };
 
-function bindElements() {
-  [
-    "backButton", "backupButton", "screenLabel", "screenTitle", "homeScreen", "deckScreen", "backupScreen",
-    "csvInput", "updateNotice", "dismissNotice", "importPreviewPanel", "importPreviewList",
-    "cancelImportButton", "confirmImportButton", "deckCount", "deckList", "deckStats", "listTab", "testTab",
-    "listPanel", "testPanel", "searchInput", "sortSelect", "cardList", "testModeSelect", "startTestButton",
-    "testIdle", "testRunning", "timerBar", "timerText", "testProgress", "finishTestButton", "revealButton",
-    "testTerm", "answerPanel", "testMeaning", "testSummary", "exportBackupButton", "restoreInput", "toast"
-  ].forEach((id) => {
-    el[id] = document.getElementById(id);
-  });
+function showScreen(name) {
+  Object.values(SCREENS).forEach((id) => $(id).classList.remove("active"));
+  $(SCREENS[name]).classList.add("active");
+
+  const label = $("screenLabel");
+  const title = $("screenTitle");
+  if (name === "home") {
+    label.textContent = "Library";
+    title.textContent = APP_NAME;
+    $("openMenuButton").classList.remove("hidden");
+  } else if (name === "deck") {
+    label.textContent = "単語帳";
+    title.textContent = App.currentDeck ? App.currentDeck.name : "";
+    $("openMenuButton").classList.remove("hidden");
+  } else if (name === "backup") {
+    label.textContent = "設定";
+    title.textContent = "バックアップ / 設定";
+    $("openMenuButton").classList.remove("hidden");
+  }
+  window.scrollTo(0, 0);
 }
 
-function bindEvents() {
-  el.backButton.addEventListener("click", () => {
-    if (screenIs("backupScreen")) showHome();
-    else if (screenIs("deckScreen")) showHome();
-  });
-  el.backupButton.addEventListener("click", showBackup);
-  el.csvInput.addEventListener("change", handleCsvSelection);
-  el.cancelImportButton.addEventListener("click", clearImportPreview);
-  el.confirmImportButton.addEventListener("click", confirmImports);
-  el.dismissNotice.addEventListener("click", dismissNotice);
-  el.listTab.addEventListener("click", () => switchTab("list"));
-  el.testTab.addEventListener("click", () => switchTab("test"));
-  el.searchInput.addEventListener("input", renderCards);
-  el.sortSelect.addEventListener("change", renderCards);
-  el.startTestButton.addEventListener("click", startTest);
-  el.finishTestButton.addEventListener("click", () => finishTest("manual"));
-  el.revealButton.addEventListener("click", revealAnswer);
-  document.querySelectorAll(".answer-button").forEach((button) => {
-    button.addEventListener("click", () => answerCurrent(button.dataset.result));
-  });
-  el.exportBackupButton.addEventListener("click", exportBackup);
-  el.restoreInput.addEventListener("change", restoreBackup);
+function closeMenu(force = false) {
+  $("menuBackdrop").classList.add("hidden");
+  $("drawer").classList.remove("open");
+  if (force) document.body.style.overflow = "";
 }
 
-function openDb() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains("decks")) {
-        const decks = db.createObjectStore("decks", { keyPath: "id" });
-        decks.createIndex("updatedAt", "updatedAt");
-      }
-      if (!db.objectStoreNames.contains("cards")) {
-        const cards = db.createObjectStore("cards", { keyPath: "id" });
-        cards.createIndex("deckId", "deckId");
-        cards.createIndex("deckIdTerm", ["deckId", "term"], { unique: false });
-      }
-      if (!db.objectStoreNames.contains("testHistory")) {
-        const history = db.createObjectStore("testHistory", { keyPath: "id" });
-        history.createIndex("deckId", "deckId");
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+function openMenu() {
+  $("menuBackdrop").classList.remove("hidden");
+  $("drawer").classList.add("open");
+  document.body.style.overflow = "hidden";
 }
 
-function tx(storeNames, mode = "readonly") {
-  const transaction = state.db.transaction(storeNames, mode);
-  return {
-    transaction,
-    stores: Array.isArray(storeNames)
-      ? Object.fromEntries(storeNames.map((name) => [name, transaction.objectStore(name)]))
-      : transaction.objectStore(storeNames)
-  };
+/* -------------------------------------------------------------------------
+ * ホーム（単語帳一覧）
+ * ------------------------------------------------------------------------- */
+async function loadDecks() {
+  App.decks = await db.getAll(STORE_DECKS);
+  App.decks.sort((a, b) => (a.order || 0) - (b.order || 0));
+  renderDeckList();
 }
 
-function requestToPromise(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+function renderDeckList() {
+  const list = $("deckList");
+  $("deckCount").textContent = App.decks.length + "件";
+  if (App.decks.length === 0) {
+    list.className = "deck-grid empty-state";
+    list.textContent = "まだ単語帳がありません。「CSVを追加」から読み込んでください。";
+    return;
+  }
+  list.className = "deck-grid";
+  list.innerHTML = App.decks.map((deck) => {
+    const avg = deck.avgScore != null ? deck.avgScore.toFixed(2) : "-";
+    return `
+      <div class="deck-card" data-id="${esc(deck.id)}">
+        <div class="deck-main">
+          <button class="deck-open" type="button">${esc(deck.name)}
+            <span class="deck-count">${esc(deck.wordCount)}単語</span>
+          </button>
+          <div class="deck-actions">
+            <button class="mini-button" data-act="rename" type="button">名前変更</button>
+            <button class="mini-button danger" data-act="delete" type="button">削除</button>
+          </div>
+        </div>
+        <div class="deck-meta">平均スコア ${avg}</div>
+      </div>`;
+  }).join("");
 }
 
-function transactionDone(transaction) {
-  return new Promise((resolve, reject) => {
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
-}
-
-async function getAll(storeName) {
-  const { stores } = tx(storeName);
-  return requestToPromise(stores.getAll());
-}
-
-async function refreshDecks() {
-  state.decks = (await getAll("decks")).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  await Promise.all(state.decks.map(async (deck) => {
-    deck.cards = await getCardsByDeck(deck.id);
-  }));
-  renderDecks();
-}
-
-async function getCardsByDeck(deckId) {
-  const { stores } = tx("cards");
-  const cards = await requestToPromise(stores.index("deckId").getAll(deckId));
-  return cards.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-}
-
-async function handleCsvSelection(event) {
-  const files = [...event.target.files];
-  if (!files.length) return;
-  try {
-    state.pendingImports = [];
-    for (const file of files) {
-      state.pendingImports.push(await parseCsvFile(file));
+function bindDeckList() {
+  $("deckList").addEventListener("click", (e) => {
+    const card = e.target.closest(".deck-card");
+    if (!card) return;
+    const deckId = card.dataset.id;
+    const btn = e.target.closest("button");
+    if (btn) {
+      const act = btn.dataset.act;
+      if (act === "rename") return renameDeck(deckId);
+      if (act === "delete") return deleteDeck(deckId);
+      if (btn.classList.contains("deck-open")) return openDeck(deckId);
+      return;
     }
-    renderImportPreview();
-  } catch (error) {
-    showToast(`CSVを読み込めませんでした: ${error.message}`);
-  } finally {
-    el.csvInput.value = "";
-  }
-}
-
-async function parseCsvFile(file) {
-  const buffer = await file.arrayBuffer();
-  const decoded = decodeCsv(buffer);
-  const rows = parseCsv(decoded.text);
-  if (rows.length < 2) throw new Error(`${file.name}: データ行がありません`);
-
-  const headers = rows[0].map((value) => value.trim().replace(/^\uFEFF/, ""));
-  const termIndex = findHeader(headers, ["英単語", "単語", "word", "term"]);
-  const meaningIndex = findHeader(headers, ["意味", "訳", "meaning", "definition"]);
-  if (termIndex < 0 || meaningIndex < 0) {
-    throw new Error(`${file.name}: 英単語/単語 と 意味 の列が必要です`);
-  }
-
-  const orderIndex = findHeader(headers, ["番号", "no", "number", "#"]);
-  const cards = [];
-  const seen = new Set();
-  const duplicates = [];
-
-  rows.slice(1).forEach((row, index) => {
-    const term = cleanCell(row[termIndex]);
-    const meaning = cleanCell(row[meaningIndex]);
-    if (!term || !meaning) return;
-
-    const duplicateKey = term.toLowerCase();
-    if (seen.has(duplicateKey)) duplicates.push(term);
-    seen.add(duplicateKey);
-
-    const extraPairs = headers
-      .map((header, i) => ({ header, value: cleanCell(row[i]) }))
-      .filter(({ header, value }, i) => value && i !== termIndex && i !== meaningIndex && i !== orderIndex && header);
-
-    cards.push({
-      term,
-      meaning,
-      extra: extraPairs.map(({ header, value }) => `${header}: ${value}`).join("\n"),
-      order: orderIndex >= 0 ? Number.parseInt(row[orderIndex], 10) || index + 1 : index + 1
-    });
+    openDeck(deckId);
   });
-
-  if (!cards.length) throw new Error(`${file.name}: 有効な単語がありません`);
-
-  return {
-    fileName: file.name,
-    deckName: file.name.replace(/\.csv$/i, ""),
-    encoding: decoded.encoding,
-    headers,
-    cards,
-    duplicates: [...new Set(duplicates)]
-  };
 }
 
-function decodeCsv(buffer) {
-  const candidates = [
-    { encoding: "UTF-8", decoder: new TextDecoder("utf-8", { fatal: false }) },
-    { encoding: "Shift_JIS", decoder: new TextDecoder("shift_jis", { fatal: false }) }
-  ].map((candidate) => {
-    const text = candidate.decoder.decode(buffer);
-    return { ...candidate, text, badness: replacementScore(text) };
-  });
-  candidates.sort((a, b) => a.badness - b.badness);
-  return candidates[0];
+async function openDeck(deckId) {
+  const deck = App.decks.find((d) => d.id === deckId);
+  if (!deck) return;
+  App.currentDeck = deck;
+  App.currentWords = await db.getAllByIndex(STORE_WORDS, "deckId", deckId);
+  showScreen("deck");
+  renderDeckStats();
+  renderWordList();
 }
 
-function replacementScore(text) {
-  const replacementCount = (text.match(/\uFFFD/g) || []).length;
-  const mojibakeCount = (text.match(/[�]/g) || []).length;
-  const headerBonus = /英単語|単語|意味/.test(text.slice(0, 200)) ? -5 : 0;
-  return replacementCount * 10 + mojibakeCount * 10 + headerBonus;
+async function renameDeck(deckId) {
+  const deck = App.decks.find((d) => d.id === deckId);
+  if (!deck) return;
+  const name = prompt("新しい単語帳名を入力してください", deck.name);
+  if (name == null || name.trim() === "") return;
+  deck.name = name.trim();
+  await db.put(STORE_DECKS, deck);
+  loadDecks();
+  showToast("名前を変更しました");
 }
 
-function parseCsv(text) {
+async function deleteDeck(deckId) {
+  if (!confirm("この単語帳と、含まれる単語をすべて削除しますか？")) return;
+  await db.del(STORE_DECKS, deckId);
+  await db.delByIndex(STORE_WORDS, "deckId", deckId);
+  await db.delByIndex(STORE_TESTS, "deckId", deckId);
+  delete App.cachedWords[deckId];
+  loadDecks();
+  showToast("単語帳を削除しました");
+}
+
+/* -------------------------------------------------------------------------
+ * CSV インポート
+ * ------------------------------------------------------------------------- */
+function parseCSV(text) {
   const rows = [];
   let row = [];
-  let cell = "";
-  let quoted = false;
-
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i];
-    const next = text[i + 1];
-    if (quoted) {
-      if (char === '"' && next === '"') {
-        cell += '"';
-        i += 1;
-      } else if (char === '"') {
-        quoted = false;
-      } else {
-        cell += char;
-      }
-    } else if (char === '"') {
-      quoted = true;
-    } else if (char === ",") {
-      row.push(cell);
-      cell = "";
-    } else if (char === "\n") {
-      row.push(cell.replace(/\r$/, ""));
-      rows.push(row);
-      row = [];
-      cell = "";
+  let cur = "";
+  let inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuote) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { cur += '"'; i++; }
+        else inQuote = false;
+      } else cur += c;
+    } else if (c === '"') {
+      inQuote = true;
+    } else if (c === ",") {
+      row.push(cur); cur = "";
+    } else if (c === "\n") {
+      row.push(cur); cur = ""; rows.push(row); row = [];
+    } else if (c === "\r") {
+      // 無視
     } else {
-      cell += char;
+      cur += c;
     }
   }
-  if (cell || row.length) {
-    row.push(cell.replace(/\r$/, ""));
-    rows.push(row);
+  if (cur !== "" || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+}
+
+function decodeBuffer(buffer) {
+  if (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    return new TextDecoder("utf-8").decode(buffer.subarray(3));
   }
-  return rows.filter((r) => r.some((value) => cleanCell(value)));
+  let hasNull = false;
+  for (let i = 0; i < buffer.length; i++) {
+    if (buffer[i] === 0) { hasNull = true; break; }
+  }
+  if (!hasNull) {
+    try { return new TextDecoder("utf-8").decode(buffer); }
+    catch (e) { /* fallthrough */ }
+  }
+  try {
+    return new TextDecoder(ENC_SHIFT_JIS).decode(buffer);
+  } catch (e) {
+    return new TextDecoder("utf-8").decode(buffer);
+  }
 }
 
-function findHeader(headers, names) {
-  const normalized = headers.map((header) => header.trim().toLowerCase());
-  return normalized.findIndex((header) => names.some((name) => header === name.toLowerCase()));
-}
+let pendingImports = [];
 
-function cleanCell(value) {
-  return String(value ?? "").trim();
+function handleCsvFiles(files) {
+  if (!files || files.length === 0) return;
+  closeMenu(true);
+  const reads = Array.from(files).map((file) =>
+    file.arrayBuffer().then((buf) => decodeBuffer(new Uint8Array(buf)))
+  );
+  Promise.all(reads).then((texts) => {
+    const result = [];
+    files.forEach((file, idx) => {
+      const rows = parseCSV(texts[idx]);
+      const name = file.name.replace(/\.csv$/i, "") || "単語帳";
+      const terms = [];
+      let started = false;
+      rows.forEach((r) => {
+        const term = (r[0] || "").trim();
+        const meaning = (r[1] || "").trim();
+        if (!term) return;
+        if (!started && /^(term|word|単語|vocab|表|表1)$/i.test(term)) { started = true; return; }
+        started = true;
+        terms.push({ term, meaning });
+      });
+      if (terms.length) result.push({ deckName: name, terms });
+    });
+    if (result.length === 0) { showToast("読み込める単語がありません"); return; }
+    pendingImports = result;
+    showScreen("home");
+    renderImportPreview();
+    $("importPreviewPanel").classList.remove("hidden");
+    $("importPreviewPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 }
 
 function renderImportPreview() {
-  el.importPreviewPanel.classList.remove("hidden");
-  el.importPreviewList.innerHTML = state.pendingImports.map((item) => `
-    <article class="preview-item ${item.duplicates.length ? "warning" : ""}">
-      <h3>${escapeHtml(item.deckName)}</h3>
-      <div class="deck-stats">
-        <span class="stat-pill">${item.cards.length}語</span>
-        <span class="stat-pill">${item.encoding}</span>
-        <span class="stat-pill">列: ${item.headers.map(escapeHtml).join(" / ")}</span>
+  const list = $("importPreviewList");
+  list.innerHTML = pendingImports.map((imp) => `
+    <div class="preview-card">
+      <div class="section-head">
+        <strong>${esc(imp.deckName)}</strong>
+        <span class="muted">${imp.terms.length}語</span>
       </div>
-      ${item.duplicates.length ? `<p class="muted">重複候補: ${item.duplicates.slice(0, 6).map(escapeHtml).join(", ")}${item.duplicates.length > 6 ? "..." : ""}</p>` : ""}
-    </article>
-  `).join("");
+      <div class="preview-samples">
+        ${imp.terms.slice(0, 4).map((t) => `<div><b>${esc(t.term)}</b> — ${esc(t.meaning)}</div>`).join("")}
+        ${imp.terms.length > 4 ? `<div class="muted">...ほか ${imp.terms.length - 4}語</div>` : ""}
+      </div>
+    </div>`).join("");
 }
 
-function clearImportPreview() {
-  state.pendingImports = [];
-  el.importPreviewPanel.classList.add("hidden");
-  el.importPreviewList.innerHTML = "";
-}
-
-async function confirmImports() {
-  if (!state.pendingImports.length) return;
-  const now = new Date().toISOString();
-  const { transaction, stores } = tx(["decks", "cards"], "readwrite");
-
-  for (const item of state.pendingImports) {
-    const deckId = crypto.randomUUID();
-    stores.decks.put({
-      id: deckId,
-      name: item.deckName,
-      createdAt: now,
-      updatedAt: now,
-      sourceFileName: item.fileName,
-      schemaVersion: APP_SCHEMA_VERSION
-    });
-    item.cards.forEach((card) => {
-      stores.cards.put({
-        id: crypto.randomUUID(),
-        deckId,
-        term: card.term,
-        meaning: card.meaning,
-        extra: card.extra,
-        order: card.order,
-        score: SCORE_DEFAULT,
-        testedCount: 0,
-        createdAt: now,
-        updatedAt: now
-      });
-    });
+async function confirmImport() {
+  for (const imp of pendingImports) {
+    const deckId = uid();
+    const deck = { id: deckId, name: imp.deckName, order: Date.now(), wordCount: imp.terms.length, avgScore: SCORE_INIT };
+    await db.put(STORE_DECKS, deck);
+    for (const t of imp.terms) {
+      await db.put(STORE_WORDS, { deckId, term: t.term, meaning: t.meaning, score: SCORE_INIT, tested: false });
+    }
   }
-
-  await transactionDone(transaction);
-  const count = state.pendingImports.length;
-  clearImportPreview();
-  await refreshDecks();
-  showToast(`${count}件の単語帳を保存しました`);
+  const total = pendingImports.reduce((s, x) => s + x.terms.length, 0);
+  pendingImports = [];
+  $("importPreviewPanel").classList.add("hidden");
+  $("csvInput").value = "";
+  await loadDecks();
+  showToast(total + "語をインポートしました");
 }
 
-function renderDecks() {
-  el.deckCount.textContent = `${state.decks.length}件`;
-  if (!state.decks.length) {
-    el.deckList.className = "deck-grid empty-state";
-    el.deckList.textContent = "まだ単語帳がありません。";
+/* -------------------------------------------------------------------------
+ * 単語一覧（カードUI）
+ * ------------------------------------------------------------------------- */
+function filteredWords() {
+  const q = ($("searchInput").value || "").trim().toLowerCase();
+  let words = App.currentWords;
+  if (q) {
+    words = words.filter((w) =>
+      (w.term || "").toLowerCase().includes(q) || (w.meaning || "").toLowerCase().includes(q)
+    );
+  }
+  if (App.sortMode === "scoreAsc") words = words.slice().sort((a, b) => (a.score||0) - (b.score||0));
+  else if (App.sortMode === "scoreDesc") words = words.slice().sort((a, b) => (b.score||0) - (a.score||0));
+  else if (App.sortMode === "term") words = words.slice().sort((a, b) => String(a.term).localeCompare(String(b.term)));
+  return words;
+}
+
+function renderWordList() {
+  const list = $("cardList");
+  const words = filteredWords();
+  if (words.length === 0) {
+    list.className = "word-grid empty-state";
+    list.innerHTML = "<div>条件に一致する単語がありません</div>";
     return;
   }
-  el.deckList.className = "deck-grid";
-  el.deckList.innerHTML = state.decks.map((deck) => {
-    const stats = deckSummary(deck.cards);
-    return `
-      <article class="deck-card">
-        <h3>${escapeHtml(deck.name)}</h3>
-        <div class="deck-stats">
-          <span class="stat-pill">${deck.cards.length}語</span>
-          <span class="stat-pill">平均 ${stats.average}</span>
-          <span class="stat-pill">低スコア ${stats.lowCount}</span>
+  list.className = "word-grid";
+  list.innerHTML = words.map((w, i) => `
+    <div class="flip-card" data-id="${w.id}">
+      <div class="flip-inner">
+        <button class="flip-face flip-front" type="button">
+          <span class="flip-index">#${i + 1}</span>
+          <span class="flip-term">${esc(w.term)}</span>
+          <span class="flip-score">score ${(w.score||SCORE_INIT).toFixed(2)}</span>
+        </button>
+        <div class="flip-face flip-back">
+          <span class="flip-meaning">${w.meaning ? esc(w.meaning) : "<i>（意味なし）</i>"}</span>
+          <button class="mini-button" data-act="edit" type="button">編集</button>
         </div>
-        <div class="deck-actions">
-          <button class="primary-button" type="button" data-open-deck="${deck.id}" data-tab="list">一覧</button>
-          <button class="ghost-button" type="button" data-open-deck="${deck.id}" data-tab="test">テスト</button>
-        </div>
-      </article>
-    `;
-  }).join("");
-  el.deckList.querySelectorAll("[data-open-deck]").forEach((button) => {
-    button.addEventListener("click", () => openDeck(button.dataset.openDeck, button.dataset.tab));
+      </div>
+    </div>`).join("");
+}
+
+function bindWordList() {
+  $("cardList").addEventListener("click", (e) => {
+    const card = e.target.closest(".flip-card");
+    if (!card) return;
+    const editBtn = e.target.closest('[data-act="edit"]');
+    if (editBtn) return addNewWord(card.dataset.id);
+    card.classList.toggle("flipped");
+  });
+  $("searchInput").addEventListener("input", renderWordList);
+  $("sortSelect").addEventListener("change", (e) => {
+    App.sortMode = e.target.value;
+    renderWordList();
   });
 }
 
-function deckSummary(cards) {
-  if (!cards.length) return { average: "0.00", lowCount: 0 };
-  const total = cards.reduce((sum, card) => sum + Number(card.score || SCORE_DEFAULT), 0);
-  const lowCount = cards.filter((card) => Number(card.score || SCORE_DEFAULT) < 1).length;
-  return { average: (total / cards.length).toFixed(2), lowCount };
-}
-
-async function openDeck(deckId, tab = "list") {
-  const deck = state.decks.find((item) => item.id === deckId);
-  if (!deck) return;
-  state.currentDeck = { ...deck, cards: await getCardsByDeck(deck.id) };
-  showScreen("deckScreen", "Deck", state.currentDeck.name);
-  renderDeckStats();
-  switchTab(tab);
-  renderCards();
+async function addNewWord(wordId) {
+  const word = {}; // 新規は未使用：単語編集はprompt2個
+  if (wordId) {
+    const w = App.currentWords.find((x) => String(x.id) === String(wordId));
+    if (!w) return;
+    const term = prompt("用語を編集", w.term);
+    if (term == null) return;
+    const meaning = prompt("意味を編集", w.meaning);
+    if (meaning == null) return;
+    w.term = term.trim();
+    w.meaning = meaning.trim();
+    await db.put(STORE_WORDS, w);
+    App.currentWords = await db.getAllByIndex(STORE_WORDS, "deckId", App.currentDeck.id);
+    renderWordList();
+    showToast("編集しました");
+  }
 }
 
 function renderDeckStats() {
-  const stats = deckSummary(state.currentDeck.cards);
-  el.deckStats.innerHTML = `
-    <span class="stat-pill">${state.currentDeck.cards.length}語</span>
-    <span class="stat-pill">平均スコア ${stats.average}</span>
-    <span class="stat-pill">低スコア ${stats.lowCount}</span>
-  `;
+  const stats = $("deckStats");
+  const words = App.currentWords;
+  const avg = words.length
+    ? (words.reduce((s, w) => s + (w.score || SCORE_INIT), 0) / words.length).toFixed(2)
+    : "-";
+  stats.innerHTML = `
+    <div class="stat"><b>${words.length}</b><span>単語数</span></div>
+    <div class="stat"><b>${avg}</b><span>平均スコア</span></div>`;
 }
 
-function switchTab(tab) {
-  state.currentTab = tab;
-  el.listTab.classList.toggle("active", tab === "list");
-  el.testTab.classList.toggle("active", tab === "test");
-  el.listPanel.classList.toggle("active", tab === "list");
-  el.testPanel.classList.toggle("active", tab === "test");
-  if (tab === "test") resetTestView();
+/* -------------------------------------------------------------------------
+ * バックアップ / 復元
+ * ------------------------------------------------------------------------- */
+async function exportBackup() {
+  const decks = await db.getAll(STORE_DECKS);
+  const words = await db.getAll(STORE_WORDS);
+  const tests = await db.getAll(STORE_TESTS);
+  const payload = {
+    app: "vocab-pwa",
+    backupVersion: BACKUP_VERSION,
+    exportedAt: new Date().toISOString(),
+    decks,
+    words,
+    tests,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `単語帳_backup_${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast("JSONバックアップを書き出しました");
 }
 
-function renderCards() {
-  if (!state.currentDeck) return;
-  const query = el.searchInput.value.trim().toLowerCase();
-  let cards = [...state.currentDeck.cards];
-  if (query) {
-    cards = cards.filter((card) =>
-      `${card.term} ${card.meaning} ${card.extra || ""}`.toLowerCase().includes(query)
-    );
-  }
-  const sort = el.sortSelect.value;
-  cards.sort((a, b) => {
-    if (sort === "scoreAsc") return a.score - b.score;
-    if (sort === "scoreDesc") return b.score - a.score;
-    if (sort === "term") return a.term.localeCompare(b.term);
-    return (a.order ?? 0) - (b.order ?? 0);
-  });
+async function restoreBackup(file) {
+  if (!file) return;
+  const text = await file.text();
+  let data;
+  try { data = JSON.parse(text); } catch (e) { showToast("JSONとして読み込めません"); return; }
 
-  if (!cards.length) {
-    el.cardList.className = "word-grid empty-state";
-    el.cardList.textContent = "表示できる単語がありません。";
-    return;
-  }
-  el.cardList.className = "word-grid";
-  el.cardList.innerHTML = cards.map((card) => `
-    <button class="word-card" type="button" data-card-id="${card.id}" aria-label="${escapeHtml(card.term)}">
-      <span class="word-card-inner">
-        <span class="term">${escapeHtml(card.term)}</span>
-        <span class="meaning hidden">${escapeHtml(card.meaning)}</span>
-        ${card.extra ? `<span class="extra hidden">${escapeHtml(card.extra)}</span>` : ""}
-        <span class="score">Score ${Number(card.score).toFixed(2)}</span>
-      </span>
-    </button>
-  `).join("");
-  el.cardList.querySelectorAll(".word-card").forEach((button) => {
-    button.addEventListener("click", () => {
-      button.querySelectorAll(".meaning, .extra").forEach((node) => node.classList.toggle("hidden"));
+  // バージョンチェック（アップデート対応）
+  if (data.app !== "vocab-pwa") { showToast("このアプリのバックアップではありません"); return; }
+  const v = Number(data.backupVersion || 0);
+  if (v > BACKUP_VERSION) { showToast("新しいバージョンのバックアップです"); return; }
+
+  if (!confirm("現在のデータをすべて置き換えて復元します。よろしいですか？")) { return; }
+
+  for (const store of [STORE_DECKS, STORE_WORDS, STORE_TESTS]) {
+    const conn = await db.open();
+    await new Promise((res, rej) => {
+      const tx = conn.transaction(store, "readwrite");
+      tx.objectStore(store).clear();
+      tx.oncomplete = res;
+      tx.onerror = () => rej(tx.error);
     });
-  });
+  }
+  const decks = data.decks || [];
+  const words = data.words || [];
+  const tests = data.tests || [];
+  for (const item of decks) await db.put(STORE_DECKS, item);
+  for (const item of words) await db.put(STORE_WORDS, item);
+  for (const item of tests) await db.put(STORE_TESTS, item);
+
+  await loadDecks();
+  showToast(`復元しました（単語帳${decks.length}件 / 単語${words.length}語）`);
 }
 
-function resetTestView() {
-  stopTimer();
-  state.test = null;
-  el.testIdle.classList.remove("hidden");
-  el.testRunning.classList.add("hidden");
-  el.testSummary.classList.add("hidden");
-  el.answerPanel.classList.add("hidden");
+/* -------------------------------------------------------------------------
+ * 単語テスト
+ * ------------------------------------------------------------------------- */
+const Test = {
+  running: false,
+  seq: [],          // 出題オブジェクト列 { word, elapsed }
+  index: 0,
+  revealed: false,
+  startTime: 0,
+  timerId: null,
+  results: [],      // { wordId, result, elapsed }
+  partialList: [],
+  unknownList: [],
+  filter: "all",
+};
+
+function buildTestSequence() {
+  const seq = App.currentWords.slice();
+  switch (Test.filter) {
+    case "low":
+      seq.sort((a, b) => (a.score || SCORE_INIT) - (b.score || SCORE_INIT));
+      break;
+    case "untested":
+      seq.sort((a, b) => {
+        const au = a.tested ? 1 : 0;
+        const bu = b.tested ? 1 : 0;
+        return au - bu;
+      });
+      break;
+    default:
+      break;
+  }
+  Test.seq = seq.map((w) => ({ word: JSON.parse(JSON.stringify(w)), elapsed: 0 }));
 }
 
 function startTest() {
-  if (!state.currentDeck?.cards.length) {
-    showToast("テストできる単語がありません");
-    return;
-  }
-  let cards = [...state.currentDeck.cards];
-  const mode = el.testModeSelect.value;
-  if (mode === "low") {
-    cards.sort((a, b) => a.score - b.score);
-  } else if (mode === "untested") {
-    cards.sort((a, b) => (a.testedCount || 0) - (b.testedCount || 0));
-  } else {
-    cards = shuffle(cards);
-  }
+  Test.filter = $("testModeSelect").value;
+  if (!App.currentWords.length) { showToast("単語がありません"); return; }
+  Test.running = true;
+  Test.index = 0;
+  Test.results = [];
+  Test.partialList = [];
+  Test.unknownList = [];
+  buildTestSequence();
 
-  state.test = {
-    deckId: state.currentDeck.id,
-    startedAt: new Date().toISOString(),
-    cards,
-    index: 0,
-    results: [],
-    currentStartedAt: 0,
-    revealed: false
-  };
-  el.testIdle.classList.add("hidden");
-  el.testSummary.classList.add("hidden");
-  el.testRunning.classList.remove("hidden");
-  showCurrentQuestion();
+  $("testIdle").classList.add("hidden");
+  $("testRunning").classList.remove("hidden");
+  $("testSummary").classList.add("hidden");
+  renderTestQuestion();
 }
 
-function showCurrentQuestion() {
-  const current = currentTestCard();
-  if (!current) {
-    finishTest("completed");
-    return;
-  }
-  state.test.currentStartedAt = performance.now();
-  state.test.revealed = false;
-  el.testProgress.textContent = `${state.test.index + 1} / ${state.test.cards.length}`;
-  el.testTerm.textContent = current.term;
-  el.testMeaning.textContent = current.meaning;
-  el.answerPanel.classList.add("hidden");
+function renderTestQuestion() {
+  const item = Test.seq[Test.index];
+  if (!item) { finishTest(false); return; }
+  Test.revealed = false;
+  $("testProgress").textContent = `${Test.index + 1} / ${Test.seq.length}`;
+  $("testTerm").textContent = item.word.term;
+  $("testMeaning").textContent = item.word.meaning || "（意味なし）";
+  $("answerPanel").classList.add("hidden");
+  $("revealButton").disabled = false;
+  Test.startTime = performance.now();
   startTimer();
 }
 
-function currentTestCard() {
-  return state.test?.cards[state.test.index];
-}
-
-function revealAnswer() {
-  if (!state.test) return;
-  state.test.revealed = true;
-  el.answerPanel.classList.remove("hidden");
-}
-
-async function answerCurrent(result) {
-  const card = currentTestCard();
-  if (!card) return;
-  const elapsedSeconds = (performance.now() - state.test.currentStartedAt) / 1000;
-  const change = scoreChange(result, elapsedSeconds);
-  const newScore = clampScore(Number(card.score || SCORE_DEFAULT) + change);
-  const updated = {
-    ...card,
-    score: newScore,
-    testedCount: (card.testedCount || 0) + 1,
-    updatedAt: new Date().toISOString()
-  };
-
-  await putRecord("cards", updated);
-  state.currentDeck.cards = state.currentDeck.cards.map((item) => item.id === updated.id ? updated : item);
-  state.test.cards[state.test.index] = updated;
-  state.test.results.push({
-    cardId: card.id,
-    term: card.term,
-    meaning: card.meaning,
-    result,
-    elapsedSeconds: Number(elapsedSeconds.toFixed(2)),
-    scoreBefore: Number(card.score || SCORE_DEFAULT),
-    scoreAfter: newScore,
-    scoreDelta: Number(change.toFixed(2))
-  });
-
-  state.test.index += 1;
-  renderDeckStats();
-  renderCards();
-  showCurrentQuestion();
-}
-
-function scoreChange(result, elapsedSeconds) {
-  const base = { known: 0.1, partial: -0.05, unknown: -0.1 }[result] ?? 0;
-  let multiplier = 1;
-  if (elapsedSeconds <= 5) {
-    multiplier = 2;
-  } else if (elapsedSeconds > 15 && result !== "known") {
-    multiplier = 2;
-  }
-  return base * multiplier;
-}
-
-function clampScore(score) {
-  return Math.min(SCORE_MAX, Math.max(SCORE_MIN, Number(score.toFixed(2))));
-}
-
 function startTimer() {
-  stopTimer();
-  tickTimer();
-  state.timerId = window.setInterval(tickTimer, 100);
+  cancelAnimationFrame(Test.timerId);
+  const start = Test.startTime;
+  const bar = $("timerBar");
+  const text = $("timerText");
+
+  const tick = (now) => {
+    const elapsed = (now - start) / 1000;
+    Test.seq[Test.index].elapsed = elapsed;
+
+    if (elapsed >= TIME_FORCE_QUIT) { finishTest(true); return; }
+
+    const remain = Math.max(0, TIME_OPEN_LIMIT - elapsed);
+    const pct = clamp(remain / TIME_OPEN_LIMIT, 0, 1);
+    bar.style.transform = "scaleX(" + pct + ")";
+    text.textContent = remain.toFixed(1) + "秒";
+    text.classList.toggle("warning", remain <= 10);
+
+    if (remain <= 10 && !Test.revealed) revealAnswer();
+
+    Test.timerId = requestAnimationFrame(tick);
+  };
+  Test.timerId = requestAnimationFrame(tick);
 }
 
 function stopTimer() {
-  if (state.timerId) {
-    clearInterval(state.timerId);
-    state.timerId = null;
-  }
+  if (Test.timerId) { cancelAnimationFrame(Test.timerId); Test.timerId = null; }
 }
 
-function tickTimer() {
-  if (!state.test) return;
-  const elapsed = (performance.now() - state.test.currentStartedAt) / 1000;
-  const remaining = Math.max(0, 15 - elapsed);
-  const scale = Math.max(0, remaining / 15);
-  el.timerBar.style.transform = `scaleX(${scale})`;
-  el.timerText.textContent = elapsed <= 15
-    ? `残り ${remaining.toFixed(1)}秒`
-    : `15秒超過 ${elapsed.toFixed(1)}秒`;
-  el.timerText.classList.toggle("warning", elapsed > 15);
-  if (elapsed >= 30) finishTest("timeout");
+function revealAnswer() {
+  if (Test.revealed) return;
+  Test.revealed = true;
+  $("answerPanel").classList.remove("hidden");
 }
 
-async function finishTest(reason) {
-  if (!state.test) return;
-  const finished = state.test;
+/* -------------------------------------------------------------------------
+ * 回答処理・スコア・終了・結果表示
+ * ------------------------------------------------------------------------- */
+function onAnswer(result) {
+  if (!Test.running || !Test.revealed) return;
+  const item = Test.seq[Test.index];
+  const elapsed = item.elapsed;
+  Test.results.push({ wordId: item.word.id, result, elapsed });
+
+  if (result === "partial") Test.partialList.push(item.word);
+  else if (result === "unknown") Test.unknownList.push(item.word);
+
+  applyScore(item.word, result, elapsed);
+
   stopTimer();
-  const history = {
-    id: crypto.randomUUID(),
-    deckId: finished.deckId,
-    startedAt: finished.startedAt,
-    endedAt: new Date().toISOString(),
-    results: finished.results,
-    forcedEndReason: reason === "timeout" ? "30秒超過" : ""
-  };
-  await putRecord("testHistory", history);
-  state.test = null;
-  el.testRunning.classList.add("hidden");
-  el.testIdle.classList.add("hidden");
-  renderTestSummary(finished.results, reason);
-}
+  $("answerPanel").classList.add("hidden");
+  $("revealButton").disabled = true;
 
-function renderTestSummary(results, reason) {
-  const partial = results.filter((item) => item.result === "partial");
-  const unknown = results.filter((item) => item.result === "unknown");
-  el.testSummary.classList.remove("hidden");
-  el.testSummary.innerHTML = `
-    <h3>テスト結果</h3>
-    <div class="deck-stats">
-      <span class="stat-pill">回答 ${results.length}語</span>
-      <span class="stat-pill">${reason === "timeout" ? "30秒超過で終了" : reason === "completed" ? "完了" : "手動終了"}</span>
-    </div>
-    <div class="summary-grid">
-      ${summaryList("一部だけわかった", partial)}
-      ${summaryList("わからなかった", unknown)}
-    </div>
-  `;
-}
-
-function summaryList(title, items) {
-  return `
-    <section class="summary-card">
-      <h4>${title} (${items.length})</h4>
-      ${items.length ? `<ul>${items.map((item) => `<li><strong>${escapeHtml(item.term)}</strong>: ${escapeHtml(item.meaning)} <span class="muted">${item.scoreBefore.toFixed(2)} → ${item.scoreAfter.toFixed(2)}</span></li>`).join("")}</ul>` : `<p class="muted">該当なし</p>`}
-    </section>
-  `;
-}
-
-async function putRecord(storeName, value) {
-  const { transaction, stores } = tx(storeName, "readwrite");
-  stores.put(value);
-  await transactionDone(transaction);
-}
-
-async function exportBackup() {
-  const backup = {
-    backupVersion: BACKUP_VERSION,
-    appSchemaVersion: APP_SCHEMA_VERSION,
-    exportedAt: new Date().toISOString(),
-    decks: await getAll("decks"),
-    cards: await getAll("cards"),
-    testHistory: await getAll("testHistory")
-  };
-  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `vocab-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-  showToast("バックアップを書き出しました");
-}
-
-async function restoreBackup(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  try {
-    const backup = migrateBackup(JSON.parse(await file.text()));
-    await importBackup(backup);
-    await refreshDecks();
-    showHome();
-    showToast("バックアップを復元しました");
-  } catch (error) {
-    showToast(`復元できませんでした: ${error.message}`);
-  } finally {
-    el.restoreInput.value = "";
+  Test.index++;
+  if (Test.index < Test.seq.length) {
+    renderTestQuestion();
+  } else {
+    finishTest(false);
   }
 }
 
-function migrateBackup(backup) {
-  if (!backup || typeof backup !== "object") throw new Error("JSON形式が不正です");
-  if (!backup.backupVersion) throw new Error("バックアップバージョンがありません");
-  if (backup.backupVersion > BACKUP_VERSION) {
-    throw new Error("このアプリより新しいバックアップです。アプリを更新してください");
-  }
-  return {
-    backupVersion: BACKUP_VERSION,
-    appSchemaVersion: APP_SCHEMA_VERSION,
-    decks: Array.isArray(backup.decks) ? backup.decks : [],
-    cards: Array.isArray(backup.cards) ? backup.cards : [],
-    testHistory: Array.isArray(backup.testHistory) ? backup.testHistory : []
-  };
+/* スコア変動
+ * base: known +0.10 / partial -0.05 / unknown -0.10
+ * 0~5秒: 一律2倍 / 5~15秒: 通常 / 15秒以上: known通常、partial・unknown2倍
+ */
+function applyScore(word, result, elapsed) {
+  const base = result === "known" ? 0.10 : result === "partial" ? -0.05 : -0.10;
+  let factor = 1;
+  if (elapsed <= 5) factor = 2;
+  else if (elapsed > TIME_OPEN_LIMIT && result !== "known") factor = 2;
+  const delta = base * factor;
+  word.score = round2(clamp(round2((word.score || SCORE_INIT) + delta), SCORE_MIN, SCORE_MAX));
+  word.tested = true;
+  db.put(STORE_WORDS, word); // fire-and-forget
 }
 
-async function importBackup(backup) {
-  const now = new Date().toISOString();
-  const { transaction, stores } = tx(["decks", "cards", "testHistory"], "readwrite");
-  backup.decks.forEach((deck) => stores.decks.put({
-    id: deck.id || crypto.randomUUID(),
-    name: deck.name || "復元した単語帳",
-    createdAt: deck.createdAt || now,
-    updatedAt: now,
-    sourceFileName: deck.sourceFileName || "backup.json",
-    schemaVersion: APP_SCHEMA_VERSION
-  }));
-  backup.cards.forEach((card, index) => {
-    if (!card.deckId || !card.term || !card.meaning) return;
-    stores.cards.put({
-      id: card.id || crypto.randomUUID(),
-      deckId: card.deckId,
-      term: card.term,
-      meaning: card.meaning,
-      extra: card.extra || "",
-      order: card.order ?? index + 1,
-      score: clampScore(Number(card.score || SCORE_DEFAULT)),
-      testedCount: card.testedCount || 0,
-      createdAt: card.createdAt || now,
-      updatedAt: now
+function finishTest(forced) {
+  stopTimer();
+  const wasRunning = Test.running;
+  Test.running = false;
+  $("testRunning").classList.add("hidden");
+  if (!wasRunning) return;
+
+  // 強制終了時、未回答の現項目があれば「わからなかった」として保存
+  if (forced && Test.index < Test.seq.length && Test.revealed) {
+    const item = Test.seq[Test.index];
+    applyScore(item.word, "unknown", TIME_FORCE_QUIT);
+    Test.results.push({ wordId: item.word.id, result: "unknown", elapsed: TIME_FORCE_QUIT });
+    Test.unknownList.push(item.word);
+  }
+
+  const note = forced ? "（30秒超過のため自動終了）" : "";
+  const today = new Date().toISOString();
+  db.put(STORE_TESTS, {
+    deckId: App.currentDeck.id,
+    date: today,
+    total: Test.seq.length,
+    results: Test.results,
+  });
+
+  updateDeckAvg().then(() => {
+    App.currentWords = db.getAllByIndex(STORE_WORDS, "deckId", App.currentDeck.id).then((ws) => {
+      App.currentWords = ws;
+      renderWordList();
+      renderDeckStats();
+      $("testIdle").classList.remove("hidden");
+      renderSummary(note);
     });
   });
-  backup.testHistory.forEach((history) => stores.testHistory.put({
-    id: history.id || crypto.randomUUID(),
-    deckId: history.deckId,
-    startedAt: history.startedAt || now,
-    endedAt: history.endedAt || now,
-    results: Array.isArray(history.results) ? history.results : [],
-    forcedEndReason: history.forcedEndReason || ""
-  }));
-  await transactionDone(transaction);
 }
 
-function showHome() {
-  stopTimer();
-  state.currentDeck = null;
-  showScreen("homeScreen", "Library", "単語帳");
-  refreshDecks();
+async function updateDeckAvg() {
+  const words = await db.getAllByIndex(STORE_WORDS, "deckId", App.currentDeck.id);
+  const avg = words.length
+    ? round2(words.reduce((s, w) => s + (w.score || SCORE_INIT), 0) / words.length)
+    : SCORE_INIT;
+  App.currentDeck.avgScore = avg;
+  await db.put(STORE_DECKS, App.currentDeck);
 }
 
-function showBackup() {
-  stopTimer();
-  showScreen("backupScreen", "Backup", "バックアップ");
-}
-
-function showScreen(screenId, label, title) {
-  document.querySelectorAll(".screen").forEach((screen) => screen.classList.remove("active"));
-  el[screenId].classList.add("active");
-  el.screenLabel.textContent = label;
-  el.screenTitle.textContent = title;
-  el.backButton.classList.toggle("hidden", screenId === "homeScreen");
-}
-
-function screenIs(screenId) {
-  return el[screenId].classList.contains("active");
-}
-
-function showInitialNotice() {
-  const dismissedVersion = localStorage.getItem("backupNoticeDismissedFor");
-  if (dismissedVersion === String(APP_SCHEMA_VERSION)) {
-    el.updateNotice.classList.add("hidden");
+function renderSummary(note) {
+  $("testSummary").classList.remove("hidden");
+  const n = Test.results.length;
+  const known = Test.results.filter((r) => r.result === "known").length;
+  const partial = Test.partialList.length;
+  const unknown = Test.unknownList.length;
+  let html = `<h3>テスト結果${note ? " " + esc(note) : ""}</h3>
+    <div class="summary-grid">
+      <div class="summary-stat"><b>${n}</b><span>出題</span></div>
+      <div class="summary-stat good"><b>${known}</b><span>わかった</span></div>
+      <div class="summary-stat mid"><b>${partial}</b><span>一部</span></div>
+      <div class="summary-stat bad"><b>${unknown}</b><span>わからなかった</span></div>
+    </div>`;
+  if (partial) {
+    html += `<div class="summary-section"><h4>一部だけわかった（${partial}）</h4><ul>${partial.map((w) => `<li><b>${esc(w.term)}</b> — ${esc(w.meaning)}</li>`).join("")}</ul></div>`;
   }
-}
-
-function dismissNotice() {
-  localStorage.setItem("backupNoticeDismissedFor", String(APP_SCHEMA_VERSION));
-  el.updateNotice.classList.add("hidden");
-}
-
-function showToast(message) {
-  el.toast.textContent = message;
-  el.toast.classList.remove("hidden");
-  window.clearTimeout(showToast.timeoutId);
-  showToast.timeoutId = window.setTimeout(() => el.toast.classList.add("hidden"), 3200);
-}
-
-function shuffle(items) {
-  const copy = [...items];
-  for (let i = copy.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
+  if (unknown) {
+    html += `<div class="summary-section"><h4>わからなかった（${unknown}）</h4><ul>${unknown.map((w) => `<li><b>${esc(w.term)}</b> — ${esc(w.meaning)}</li>`).join("")}</ul></div>`;
   }
-  return copy;
+  html += `<p class="muted">一覧タブからスコアを確認できます。</p>`;
+  $("testSummary").innerHTML = html;
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;")
-    .replaceAll("\n", "<br>");
+/* -------------------------------------------------------------------------
+ * 初期化・イベント登録
+ * ------------------------------------------------------------------------- */
+function bindTabs() {
+  const listTab = $("listTab");
+  const testTab = $("testTab");
+  const switchPanel = (showList) => {
+    listTab.classList.toggle("active", showList);
+    testTab.classList.toggle("active", !showList);
+    $("listPanel").classList.toggle("active", showList);
+    $("testPanel").classList.toggle("active", !showList);
+  };
+  listTab.addEventListener("click", () => switchPanel(true));
+  testTab.addEventListener("click", () => switchPanel(false));
 }
 
-function registerServiceWorker() {
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js").catch(() => {
-      showToast("オフライン機能の登録に失敗しました");
-    });
+function bindGlobalEvents() {
+  // ハンバーガーメニュー
+  $("openMenuButton").addEventListener("click", openMenu);
+  $("closeMenuButton").addEventListener("click", closeMenu);
+  $("menuBackdrop").addEventListener("click", () => closeMenu(true));
+  $("menuHome").addEventListener("click", () => { closeMenu(true); showScreen("home"); loadDecks(); });
+  $("menuBackup").addEventListener("click", () => { closeMenu(true); showScreen("backup"); });
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(true); });
+
+  // 戻る
+  const backBtn = $("backButton");
+  if (backBtn) backBtn.addEventListener("click", () => { closeMenu(true); showScreen("home"); loadDecks(); });
+
+  // CSVインポート
+  $("csvInput").addEventListener("change", (e) => handleCsvFiles(e.target.files));
+  $("cancelImportButton").addEventListener("click", () => {
+    pendingImports = [];
+    $("importPreviewPanel").classList.add("hidden");
+    $("csvInput").value = "";
+  });
+  $("confirmImportButton").addEventListener("click", confirmImport);
+
+  // バックアップ
+  $("exportBackupButton").addEventListener("click", exportBackup);
+  $("restoreInput").addEventListener("change", (e) => {
+    restoreBackup(e.target.files[0]);
+    e.target.value = "";
+  });
+
+  // テスト
+  $("startTestButton").addEventListener("click", startTest);
+  $("revealButton").addEventListener("click", () => { if (Test.running) revealAnswer(); });
+  $("finishTestButton").addEventListener("click", () => {
+    if (confirm("テストを終了しますか？")) finishTest(false);
+  });
+  document.querySelectorAll(".answer-button").forEach((btn) => {
+    btn.addEventListener("click", () => onAnswer(btn.dataset.result));
+  });
+
+  // 通知を閉じる
+  $("dismissNotice").addEventListener("click", () => {
+    $("updateNotice").classList.add("hidden");
+    localStorage.setItem("noticeDismissed", "1");
+  });
+}
+
+async function init() {
+  try {
+    await db.open();
+  } catch (e) {
+    showToast("データベースを開けませんでした");
+    return;
   }
+  bindGlobalEvents();
+  bindDeckList();
+  bindWordList();
+  bindTabs();
+
+  if (!localStorage.getItem("noticeDismissed")) {
+    $("updateNotice").classList.remove("hidden");
+  }
+
+  showScreen("home");
+  await loadDecks();
 }
+
+document.addEventListener("DOMContentLoaded", init);
+/* END APP */

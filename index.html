@@ -16,28 +16,33 @@
 <body>
   <div class="app-shell">
     <header class="topbar">
-      <button class="icon-button hidden" id="backButton" type="button" aria-label="戻る">‹</button>
       <div>
         <p class="eyebrow" id="screenLabel">Library</p>
         <h1 id="screenTitle">単語帳</h1>
       </div>
-      <button class="icon-button" id="backupButton" type="button" aria-label="バックアップ">⇩</button>
+      <button class="icon-button" id="openMenuButton" type="button" aria-label="メニュー">☰</button>
     </header>
+
+    <!-- ハンバーガーメニュー（ドロワー） -->
+    <div class="menu-backdrop hidden" id="menuBackdrop"></div>
+    <nav class="drawer" id="drawer" aria-label="メニュー">
+      <div class="drawer-header">
+        <span class="drawer-title">メニュー</span>
+        <button class="icon-button" id="closeMenuButton" type="button" aria-label="閉じる">✕</button>
+      </div>
+      <div class="drawer-items">
+        <button class="drawer-item" id="menuHome" type="button">単語帳一覧</button>
+        <label class="drawer-item file-drawer">
+          <input id="csvInput" type="file" accept=".csv,text/csv" multiple>
+          CSVを追加
+        </label>
+        <button class="drawer-item" id="menuBackup" type="button">バックアップ / 設定</button>
+      </div>
+    </nav>
 
     <main>
       <section class="screen active" id="homeScreen">
-        <div class="upload-panel">
-          <div>
-            <h2>CSVを追加</h2>
-            <p>UTF-8 / Shift_JIS対応。複数ファイルをまとめて読み込めます。</p>
-          </div>
-          <label class="file-button">
-            CSVを選択
-            <input id="csvInput" type="file" accept=".csv,text/csv" multiple>
-          </label>
-        </div>
-
-        <div class="notice" id="updateNotice">
+        <div class="notice hidden" id="updateNotice">
           <strong>バックアップ推奨</strong>
           <span>アプリ更新や端末移行に備えて、定期的にJSONバックアップを保存してください。</span>
           <button id="dismissNotice" type="button">閉じる</button>
@@ -57,7 +62,7 @@
             <h2>単語帳</h2>
             <span id="deckCount" class="muted">0件</span>
           </div>
-          <div id="deckList" class="deck-grid empty-state">まだ単語帳がありません。</div>
+          <div id="deckList" class="deck-grid empty-state">まだ単語帳がありません。メニューの「CSVを追加」から読み込んでください。</div>
         </section>
       </section>
 

@@ -50,7 +50,7 @@ label.file-button {
   top: 0;
   z-index: 5;
   display: grid;
-  grid-template-columns: 44px 1fr 44px;
+  grid-template-columns: 1fr 44px;
   gap: 8px;
   align-items: center;
   padding: 10px 0 12px;
@@ -409,7 +409,7 @@ p {
   position: absolute;
   top: -2px;
   bottom: -2px;
-  left: 33.333%;
+  left: 66.667%;
   width: 3px;
   z-index: 2;
   background: #18212f;
@@ -505,6 +505,314 @@ p {
 
 .preview-item.warning {
   border-color: #d49a28;
+}
+
+/* ===== ハンバーガーメニュー（ドロワー） ===== */
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(15, 20, 30, 0.4);
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 21;
+  width: min(80vw, 300px);
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  transform: translateX(100%);
+  transition: transform 0.22s ease;
+  display: flex;
+  flex-direction: column;
+  padding: max(14px, env(safe-area-inset-top)) 14px max(20px, env(safe-area-inset-bottom));
+}
+
+.drawer.open {
+  transform: translateX(0);
+}
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.drawer-title {
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.drawer-items {
+  display: grid;
+  gap: 8px;
+}
+
+.drawer-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  padding: 12px 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.drawer-item:active {
+  background: var(--surface-2);
+}
+
+.file-drawer input {
+  display: none;
+}
+
+/* ===== 単語帳カード ===== */
+.deck-open {
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  font-size: 17px;
+  font-weight: 800;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 0;
+}
+
+.deck-count {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.deck-main {
+  display: grid;
+  gap: 10px;
+}
+
+.deck-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mini-button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mini-button.danger {
+  color: var(--red);
+  border-color: #e0b4b4;
+}
+
+.deck-meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ===== 単語カード（裏返し） ===== */
+.word-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.flip-card {
+  perspective: 900px;
+  cursor: pointer;
+}
+
+.flip-inner {
+  position: relative;
+  min-height: 150px;
+  transition: transform 0.5s;
+  transform-style: preserve-3d;
+}
+
+.flip-card.flipped .flip-inner {
+  transform: rotateY(180deg);
+}
+
+.flip-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 12px;
+  text-align: center;
+}
+
+.flip-front {
+  color: var(--text);
+}
+
+.flip-index {
+  align-self: flex-start;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.flip-term {
+  font-size: 18px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.flip-score {
+  margin-top: auto;
+  align-self: stretch;
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.flip-back {
+  transform: rotateY(180deg);
+  color: var(--text);
+  justify-content: flex-start;
+}
+
+.flip-meaning {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+/* ===== 統計 ===== */
+.stats-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  flex: 1 1 130px;
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.stat b {
+  font-size: 22px;
+}
+
+.stat span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ===== インポートプレビュー ===== */
+.preview-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.preview-samples {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+/* ===== テスト結果 ===== */
+.summary {
+  padding: 14px;
+}
+
+.summary h3 {
+  margin: 0 0 10px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.summary-stat {
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.summary-stat b {
+  font-size: 22px;
+}
+
+.summary-stat span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.summary-stat.good b { color: var(--green); }
+.summary-stat.mid b { color: var(--amber); }
+.summary-stat.bad b { color: var(--red); }
+
+.summary-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.summary-section h4 {
+  margin: 0 0 8px;
+}
+
+.summary-section ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.answer-actions {
+  margin-top: 12px;
 }
 
 .toast {
