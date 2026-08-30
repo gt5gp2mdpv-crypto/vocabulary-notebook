@@ -354,15 +354,37 @@ function decodeBuffer(buffer) {
 
 let pendingImports = [];
 
+// ファイルを文字列として安全に読み込む（.text() を優先し、失敗時は arrayBuffer+decodeBuffer へフォールバック）
+function readFileAsText(file) {
+  // 1) file.text() は UTF-8 としてデコードする（BOM は手動除去）。
+  //    無効バイト(U+FFFD)が含まれれば Shift_JIS 等の可能性があるので arrayBuffer へフォールバック。
+  if (typeof file.text === "function") {
+    return file.text().then((text) => {
+      if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+      if (text.indexOf("\uFFFD") === -1) return text; // 合法 UTF-8
+      return file.arrayBuffer().then((buf) => decodeBuffer(new Uint8Array(buf)));
+    }).catch((e) => {
+      // file.text() 未対応/失敗 → arrayBuffer へフォールバック
+      return file.arrayBuffer().then((buf) => decodeBuffer(new Uint8Array(buf)));
+    });
+  }
+  // 2) フォールバック: arrayBuffer -> decode
+  return file.arrayBuffer().then((buf) => decodeBuffer(new Uint8Array(buf)));
+}
+
 function handleCsvFiles(files) {
   if (!files || files.length === 0) return;
   closeMenu(true);
-  const reads = Array.from(files).map((file) =>
-    file.arrayBuffer().then((buf) => decodeBuffer(new Uint8Array(buf)))
+  // FileList には forEach が無いため、必ずここで配列化する
+  const fileList = Array.from(files);
+  const reads = fileList.map((file) =>
+    readFileAsText(file).catch((e) => {
+      throw new Error("ファイル '" + (file && file.name) + "' の読み込み失敗: " + (e && e.message ? e.message : e));
+    })
   );
   Promise.all(reads).then((texts) => {
     const result = [];
-    files.forEach((file, idx) => {
+    fileList.forEach((file, idx) => {
       const rows = parseCSV(texts[idx]);
       const name = file.name.replace(/\.csv$/i, "") || "単語帳";
       const terms = [];
@@ -383,9 +405,10 @@ function handleCsvFiles(files) {
     renderImportPreview();
     $("importPreviewPanel").classList.remove("hidden");
     $("importPreviewPanel").scrollIntoView({ behavior: "smooth", block: "start" });
-  }).catch((e) => {
+    }).catch((e) => {
     console.error("CSV読み込みエラー:", e);
     showToast("CSVの読み込みに失敗しました: " + (e && e.message ? e.message : e));
+    $("csvInput").value = "";
   });
 }
 

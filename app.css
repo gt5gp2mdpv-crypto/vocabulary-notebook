@@ -578,10 +578,17 @@ p {
 
 .file-drawer input {
   position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   opacity: 0;
-  width: 0;
-  height: 0;
-  overflow: hidden;
+  cursor: pointer;
+  /* 領域を確保してタップを確実に*/
+}
+
+.file-drawer::after {
+  content: "";
 }
 
 /* ===== 単語帳カード ===== */
