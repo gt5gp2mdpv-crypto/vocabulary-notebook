@@ -651,6 +651,9 @@ const Test = {
   unknownList: [],
   filter: "all",
   reviewList: [],   // 前回のテストで「一部/わからなかった」単語（復習モード用）
+  partialCount: 0,  // 「一部だけわかった」押下回数（通常テストのみカウント）
+  unknownCount: 0,  // 「わからなかった」押下回数（通常テストのみカウント）
+  missLimit: 10,    // どちらかがこの回数に達したらテストを強制終了
 };
 
 function buildTestSequence() {
@@ -707,6 +710,8 @@ function startTest() {
   Test.results = [];
   Test.partialList = [];
   Test.unknownList = [];
+  Test.partialCount = 0;
+  Test.unknownCount = 0;
   buildTestSequence();
   if (!Test.seq.length) {
     Test.running = false;
@@ -731,6 +736,19 @@ function renderTestQuestion() {
   $("revealButton").disabled = false;
   Test.startTime = performance.now();
   startTimer();
+  updateMissCounter();
+}
+
+// テスト中の「わからなかった／一部」カウンタ表示を更新
+function updateMissCounter() {
+  const counter = $("missCounter");
+  if (!counter) return;
+  const isReview = Test.filter === "review";
+  counter.style.display = isReview ? "none" : "flex";
+  const u = $("missUnknownCount");
+  const p = $("missPartialCount");
+  if (u) u.textContent = String(Test.unknownCount);
+  if (p) p.textContent = String(Test.partialCount);
 }
 
 function startTimer() {
@@ -786,6 +804,17 @@ function onAnswer(result) {
   $("answerPanel").classList.add("hidden");
   $("revealButton").disabled = true;
 
+  // 通常テスト（復習以外）では「一部」「わからなかった」の押下回数をカウントし、
+  // どちらかが missLimit(10) 回に達したらその回答を記録した上でテストを強制終了する
+  if (Test.filter !== "review" && (result === "partial" || result === "unknown")) {
+    if (result === "partial") Test.partialCount++;
+    else Test.unknownCount++;
+    if (Test.partialCount >= Test.missLimit || Test.unknownCount >= Test.missLimit) {
+      finishTest(true, "missLimit");
+      return;
+    }
+  }
+
   Test.index++;
   if (Test.index < Test.seq.length) {
     renderTestQuestion();
@@ -833,7 +862,7 @@ function applyScore(word, result, elapsed) {
   db.put(STORE_WORDS, word); // fire-and-forget
 }
 
-function finishTest(forced) {
+function finishTest(forced, reason) {
   stopTimer();
   const wasRunning = Test.running;
   Test.running = false;
@@ -841,7 +870,8 @@ function finishTest(forced) {
   if (!wasRunning) return;
 
   // 強制終了時、未回答の現項目があれば「わからなかった」として保存
-  if (forced && Test.index < Test.seq.length) {
+  // ただし missLimit(10回到達)による終了の場合は、10回目の回答は既に記録済みなのでスキップ
+  if (forced && reason !== "missLimit" && Test.index < Test.seq.length) {
     const item = Test.seq[Test.index];
     applyScore(item.word, "unknown", TIME_FORCE_QUIT);
     Test.results.push({ wordId: item.word.id, result: "unknown", elapsed: TIME_FORCE_QUIT });
@@ -865,7 +895,12 @@ function finishTest(forced) {
   Test.partialList.concat(Test.unknownList).forEach((w) => merged.set(String(w.id), w));
   Test.reviewList = Array.from(merged.values());
 
-  const note = forced ? "（30秒超過のため自動終了）" : "";
+  let note = "";
+  if (forced) {
+    note = reason === "missLimit"
+      ? "（わからなかった・一部だけわかったが10回に達したため自動終了）"
+      : "（30秒超過のため自動終了）";
+  }
   const today = new Date().toISOString();
   db.put(STORE_TESTS, {
     deckId: App.currentDeck.id,

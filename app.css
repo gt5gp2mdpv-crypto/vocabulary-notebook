@@ -439,6 +439,40 @@ p {
   margin: 12px 0;
 }
 
+/* テスト中の「わからなかった／一部」カウンタ */
+.miss-counter {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 4px 0 2px;
+}
+
+.miss-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 3px 10px;
+  background: var(--surface-2);
+}
+
+.miss-item b {
+  font-size: 13px;
+}
+
+.miss-item .miss-limit {
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.miss-item.bad b { color: var(--red); }
+.miss-item.mid b { color: var(--amber); }
+
 .term-button {
   width: 100%;
   min-height: 160px;
