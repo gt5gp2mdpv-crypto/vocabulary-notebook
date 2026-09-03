@@ -1,4 +1,4 @@
-/* =========================================================================
+﻿/* =========================================================================
  * 単語帳 PWA - アプリケーション本体
  * ========================================================================= */
 "use strict";
@@ -189,18 +189,22 @@ function showScreen(name) {
 
   const label = $("screenLabel");
   const title = $("screenTitle");
+  const backBtn = $("backButton");
   if (name === "home") {
     label.textContent = "Library";
     title.textContent = APP_NAME;
     $("openMenuButton").classList.remove("hidden");
+    backBtn.classList.add("hidden");
   } else if (name === "deck") {
     label.textContent = "単語帳";
     title.textContent = App.currentDeck ? App.currentDeck.name : "";
     $("openMenuButton").classList.remove("hidden");
+    backBtn.classList.remove("hidden");
   } else if (name === "backup") {
     label.textContent = "設定";
     title.textContent = "バックアップ / 設定";
     $("openMenuButton").classList.remove("hidden");
+    backBtn.classList.remove("hidden");
   }
   window.scrollTo(0, 0);
 }
@@ -274,9 +278,11 @@ function bindDeckList() {
 async function openDeck(deckId) {
   const deck = App.decks.find((d) => String(d.id) === String(deckId));
   if (!deck) return;
+  if (Test.running) finishTest(false); // 別デッキへ移動時はテストを終了
   App.currentDeck = deck;
   App.currentWords = await db.getAllByIndex(STORE_WORDS, "deckId", deck.id);
   showScreen("deck");
+  switchPanel(true); // 常に一覧タブから開く
   renderDeckStats();
   renderWordList();
 }
@@ -372,6 +378,50 @@ function readFileAsText(file) {
   return file.arrayBuffer().then((buf) => decodeBuffer(new Uint8Array(buf)));
 }
 
+// CSVの列構成を自動判定して単語データを取り出す
+// ・ヘッダー行（単語/英単語/意味/番号 など）があれば列位置を判定
+// ・ヘッダーがなくても先頭列が数値のみ（番号列）ならずらす
+const TERM_HEADER = /^(英単語|単語|term|word|vocab|vocabulary|表\d*)$/i;
+const MEANING_HEADER = /^(意味|meaning|和訳|日本語|定義|訳|gloss)$/i;
+const NUM_HEADER = /^(番号|no\.?|number|id|#|順番|index)$/i;
+
+function extractTerms(rows) {
+  if (!rows.length) return [];
+  const header = rows[0].map((c) => (c || "").trim());
+  const isHeaderRow = header.some((c) => TERM_HEADER.test(c) || MEANING_HEADER.test(c) || NUM_HEADER.test(c));
+
+  let termIdx = 0;
+  let meaningIdx = 1;
+  let startRow = 0;
+
+  if (isHeaderRow) {
+    startRow = 1;
+    const t = header.findIndex((c) => TERM_HEADER.test(c));
+    const m = header.findIndex((c) => MEANING_HEADER.test(c));
+    if (t >= 0) termIdx = t;
+    if (m >= 0) meaningIdx = m;
+    if (t < 0 && m >= 0) termIdx = m === 0 ? 1 : 0;
+    if (m < 0 && t >= 0) meaningIdx = t === 0 ? 1 : 0;
+  } else {
+    // ヘッダーなし: 上位行の先頭列がすべて数値なら番号列とみなす
+    const sample = rows.slice(0, 10).filter((r) => r.length > 2);
+    if (sample.length >= 3 && sample.every((r) => /^\d+$/.test((r[0] || "").trim()))) {
+      termIdx = 1;
+      meaningIdx = 2;
+    }
+  }
+
+  const terms = [];
+  for (let i = startRow; i < rows.length; i++) {
+    const r = rows[i];
+    const term = (r[termIdx] || "").trim();
+    const meaning = (r[meaningIdx] || "").trim();
+    if (!term) continue;
+    terms.push({ term, meaning });
+  }
+  return terms;
+}
+
 function handleCsvFiles(files) {
   if (!files || files.length === 0) return;
   closeMenu(true);
@@ -387,16 +437,7 @@ function handleCsvFiles(files) {
     fileList.forEach((file, idx) => {
       const rows = parseCSV(texts[idx]);
       const name = file.name.replace(/\.csv$/i, "") || "単語帳";
-      const terms = [];
-      let started = false;
-      rows.forEach((r) => {
-        const term = (r[0] || "").trim();
-        const meaning = (r[1] || "").trim();
-        if (!term) return;
-        if (!started && /^(term|word|単語|vocab|表|表1)$/i.test(term)) { started = true; return; }
-        started = true;
-        terms.push({ term, meaning });
-      });
+      const terms = extractTerms(rows);
       if (terms.length) result.push({ deckName: name, terms });
     });
     if (result.length === 0) { showToast("読み込める単語がありません"); return; }
@@ -475,16 +516,16 @@ function renderWordList() {
     return;
   }
   list.className = "word-grid";
-  list.innerHTML = words.map((w, i) => `
+  list.innerHTML = words.map((w) => `
     <div class="flip-card" data-id="${w.id}">
       <div class="flip-inner">
         <button class="flip-face flip-front" type="button">
-          <span class="flip-index">#${i + 1}</span>
           <span class="flip-term">${esc(w.term)}</span>
           <span class="flip-score">score ${(w.score||SCORE_INIT).toFixed(2)}</span>
         </button>
         <div class="flip-face flip-back">
           <span class="flip-meaning">${w.meaning ? esc(w.meaning) : "<i>（意味なし）</i>"}</span>
+          <span class="flip-score">score ${(w.score||SCORE_INIT).toFixed(2)}</span>
           <button class="mini-button" data-act="edit" type="button">編集</button>
         </div>
       </div>
@@ -633,6 +674,7 @@ function startTest() {
   Test.filter = $("testModeSelect").value;
   if (!App.currentWords.length) { showToast("単語がありません"); return; }
   Test.running = true;
+  switchPanel(false); // テスト開始時に必ずテスト画面へ切り替え
   Test.index = 0;
   Test.results = [];
   Test.partialList = [];
@@ -727,7 +769,7 @@ function applyScore(word, result, elapsed) {
   const base = result === "known" ? 0.10 : result === "partial" ? -0.05 : -0.10;
   let factor = 1;
   if (elapsed <= 5) factor = 2;
-  else if (elapsed > TIME_OPEN_LIMIT && result !== "known") factor = 2;
+  else if (elapsed >= TIME_OPEN_LIMIT && result !== "known") factor = 2;
   const delta = base * factor;
   word.score = round2(clamp(round2((word.score || SCORE_INIT) + delta), SCORE_MIN, SCORE_MAX));
   word.tested = true;
@@ -742,7 +784,7 @@ function finishTest(forced) {
   if (!wasRunning) return;
 
   // 強制終了時、未回答の現項目があれば「わからなかった」として保存
-  if (forced && Test.index < Test.seq.length && Test.revealed) {
+  if (forced && Test.index < Test.seq.length) {
     const item = Test.seq[Test.index];
     applyScore(item.word, "unknown", TIME_FORCE_QUIT);
     Test.results.push({ wordId: item.word.id, result: "unknown", elapsed: TIME_FORCE_QUIT });
@@ -804,31 +846,41 @@ function renderSummary(note) {
 /* -------------------------------------------------------------------------
  * 初期化・イベント登録
  * ------------------------------------------------------------------------- */
-function bindTabs() {
-  const listTab = $("listTab");
-  const testTab = $("testTab");
-  const switchPanel = (showList) => {
-    listTab.classList.toggle("active", showList);
-    testTab.classList.toggle("active", !showList);
-    $("listPanel").classList.toggle("active", showList);
-    $("testPanel").classList.toggle("active", !showList);
-  };
-  listTab.addEventListener("click", () => switchPanel(true));
-  testTab.addEventListener("click", () => switchPanel(false));
+function switchPanel(showList) {
+  var listTab = document.getElementById("listTab");
+  var testTab = document.getElementById("testTab");
+  listTab.classList.toggle("active", showList);
+  testTab.classList.toggle("active", !showList);
+  document.getElementById("listPanel").classList.toggle("active", showList);
+  document.getElementById("testPanel").classList.toggle("active", !showList);
 }
 
+function bindTabs() {
+  document.getElementById("listTab").addEventListener("click", function(){ switchPanel(true); });
+  document.getElementById("testTab").addEventListener("click", function(){ switchPanel(false); });
+}
 function bindGlobalEvents() {
   // ハンバーガーメニュー
   $("openMenuButton").addEventListener("click", openMenu);
   $("closeMenuButton").addEventListener("click", closeMenu);
   $("menuBackdrop").addEventListener("click", () => closeMenu(true));
-  $("menuHome").addEventListener("click", () => { closeMenu(true); showScreen("home"); loadDecks(); });
+  $("menuHome").addEventListener("click", () => {
+    closeMenu(true);
+    if (Test.running) finishTest(false); // テスト中に離脱したら終了処理
+    showScreen("home");
+    loadDecks();
+  });
   $("menuBackup").addEventListener("click", () => { closeMenu(true); showScreen("backup"); });
   window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(true); });
 
   // 戻る
   const backBtn = $("backButton");
-  if (backBtn) backBtn.addEventListener("click", () => { closeMenu(true); showScreen("home"); loadDecks(); });
+  if (backBtn) backBtn.addEventListener("click", () => {
+    closeMenu(true);
+    if (Test.running) finishTest(false); // テスト中に離脱したら終了処理
+    showScreen("home");
+    loadDecks();
+  });
 
   // CSVインポート
   $("csvInput").addEventListener("change", (e) => handleCsvFiles(e.target.files));
@@ -847,7 +899,10 @@ function bindGlobalEvents() {
   });
 
   // テスト
-  $("startTestButton").addEventListener("click", startTest);
+  $("startTestButton").addEventListener("click", () => {
+    switchPanel(false); // 必ずテストパネルを表示してから開始
+    startTest();
+  });
   $("revealButton").addEventListener("click", () => { if (Test.running) revealAnswer(); });
   $("finishTestButton").addEventListener("click", () => {
     if (confirm("テストを終了しますか？")) finishTest(false);
@@ -881,6 +936,15 @@ async function init() {
 
   showScreen("home");
   await loadDecks();
+
+  // Service Worker 登録（オフライン対応・更新配信）
+  if ("serviceWorker" in navigator) {
+    try {
+      await navigator.serviceWorker.register("./sw.js");
+    } catch (e) {
+      console.warn("Service Worker 登録に失敗しました:", e);
+    }
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);

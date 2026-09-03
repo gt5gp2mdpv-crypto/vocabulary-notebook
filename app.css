@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color-scheme: light;
   --bg: #f7f8fb;
   --surface: #ffffff;
@@ -50,7 +50,7 @@ label.file-button {
   top: 0;
   z-index: 5;
   display: grid;
-  grid-template-columns: 1fr 44px;
+  grid-template-columns: 44px 1fr 44px;
   gap: 8px;
   align-items: center;
   padding: 10px 0 12px;
@@ -90,6 +90,10 @@ label.file-button {
 }
 
 .screen {
+  display: none;
+}
+
+.tab-panel {
   display: none;
 }
 
@@ -691,14 +695,8 @@ p {
   color: var(--text);
 }
 
-.flip-index {
-  align-self: flex-start;
-  color: var(--muted);
-  font-size: 12px;
-}
-
 .flip-term {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 800;
   overflow-wrap: anywhere;
 }
@@ -719,8 +717,12 @@ p {
   justify-content: flex-start;
 }
 
+.flip-back .flip-score {
+  margin-top: 0;
+}
+
 .flip-meaning {
-  font-size: 14px;
+  font-size: 15px;
   overflow-wrap: anywhere;
   line-height: 1.5;
   flex: 1;
