@@ -681,8 +681,14 @@ function buildTestSequence() {
           return au - bu;
         });
         break;
-      default:
+      default: {
+        // ② 全単語（all）はランダム順（Fisher–Yates）
+        for (let i = seq.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [seq[i], seq[j]] = [seq[j], seq[i]];
+        }
         break;
+      }
     }
   }
   Test.seq = seq.map((w) => ({ word: JSON.parse(JSON.stringify(w)), elapsed: 0 }));
@@ -791,8 +797,31 @@ function onAnswer(result) {
 /* スコア変動
  * base: known +0.10 / partial -0.05 / unknown -0.10
  * 0~5秒: 一律2倍 / 5~15秒: 通常 / 15秒以上: known通常、partial・unknown2倍
+ * ・復習モードではスコアを変動させない
+ * ・同一単語のスコア変動は1日1回のみ（同日中は変動しない）
  */
+function todayKey(ms) {
+  const d = new Date(ms || Date.now());
+  return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate();
+}
+
 function applyScore(word, result, elapsed) {
+  // ① 復習モードではスコアを変動させない（testedフラグのみ）
+  if (Test.filter === "review") {
+    word.tested = true;
+    db.put(STORE_WORDS, word); // fire-and-forget
+    return;
+  }
+  // ③ 同一単語のスコア変動は1日1回のみ
+  const key = todayKey();
+  if (word.lastScoreDate === key) {
+    if (!word.tested) {
+      word.tested = true;
+      db.put(STORE_WORDS, word); // fire-and-forget
+    }
+    return;
+  }
+
   const base = result === "known" ? 0.10 : result === "partial" ? -0.05 : -0.10;
   let factor = 1;
   if (elapsed <= 5) factor = 2;
@@ -800,6 +829,7 @@ function applyScore(word, result, elapsed) {
   const delta = base * factor;
   word.score = round2(clamp(round2((word.score || SCORE_INIT) + delta), SCORE_MIN, SCORE_MAX));
   word.tested = true;
+  word.lastScoreDate = key;
   db.put(STORE_WORDS, word); // fire-and-forget
 }
 
