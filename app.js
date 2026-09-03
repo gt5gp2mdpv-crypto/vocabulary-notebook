@@ -281,6 +281,7 @@ async function openDeck(deckId) {
   if (Test.running) finishTest(false); // 別デッキへ移動時はテストを終了
   App.currentDeck = deck;
   App.currentWords = await db.getAllByIndex(STORE_WORDS, "deckId", deck.id);
+  Test.reviewList = []; // 単語帳ごとに復習リストをリセット
   showScreen("deck");
   switchPanel(true); // 常に一覧タブから開く
   renderDeckStats();
@@ -649,23 +650,40 @@ const Test = {
   partialList: [],
   unknownList: [],
   filter: "all",
+  reviewList: [],   // 前回のテストで「一部/わからなかった」単語（復習モード用）
 };
 
 function buildTestSequence() {
-  const seq = App.currentWords.slice();
-  switch (Test.filter) {
-    case "low":
-      seq.sort((a, b) => (a.score || SCORE_INIT) - (b.score || SCORE_INIT));
-      break;
-    case "untested":
-      seq.sort((a, b) => {
-        const au = a.tested ? 1 : 0;
-        const bu = b.tested ? 1 : 0;
-        return au - bu;
-      });
-      break;
-    default:
-      break;
+  let seq;
+  if (Test.filter === "review") {
+    // 前回テストでできなかった単語のみ出題（重複排除、ランダム順）
+    const seen = new Set();
+    seq = Test.reviewList.filter((w) => {
+      const k = String(w.id);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    for (let i = seq.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [seq[i], seq[j]] = [seq[j], seq[i]];
+    }
+  } else {
+    seq = App.currentWords.slice();
+    switch (Test.filter) {
+      case "low":
+        seq.sort((a, b) => (a.score || SCORE_INIT) - (b.score || SCORE_INIT));
+        break;
+      case "untested":
+        seq.sort((a, b) => {
+          const au = a.tested ? 1 : 0;
+          const bu = b.tested ? 1 : 0;
+          return au - bu;
+        });
+        break;
+      default:
+        break;
+    }
   }
   Test.seq = seq.map((w) => ({ word: JSON.parse(JSON.stringify(w)), elapsed: 0 }));
 }
@@ -673,6 +691,10 @@ function buildTestSequence() {
 function startTest() {
   Test.filter = $("testModeSelect").value;
   if (!App.currentWords.length) { showToast("単語がありません"); return; }
+  if (Test.filter === "review" && !Test.reviewList.length) {
+    showToast("復習する単語がありません。先にテストを行ってください。");
+    return;
+  }
   Test.running = true;
   switchPanel(false); // テスト開始時に必ずテスト画面へ切り替え
   Test.index = 0;
@@ -680,6 +702,11 @@ function startTest() {
   Test.partialList = [];
   Test.unknownList = [];
   buildTestSequence();
+  if (!Test.seq.length) {
+    Test.running = false;
+    showToast("テスト対象の単語がありません");
+    return;
+  }
 
   $("testIdle").classList.add("hidden");
   $("testRunning").classList.remove("hidden");
@@ -791,6 +818,23 @@ function finishTest(forced) {
     Test.unknownList.push(item.word);
   }
 
+  // 復習リストを更新: 今回できなかった単語（一部 + わからなかった）
+  // 復習モード中は、まだ「わかった」になった単語を除外した残りを保持
+  const isReviewSession = Test.filter === "review";
+  const merged = new Map();
+  if (isReviewSession) {
+    // 復習前のリストを引き継ぎ、わかった単語は除外
+    const masteredIds = new Set(
+      Test.results.filter((r) => r.result === "known").map((r) => String(r.wordId))
+    );
+    App.currentWords.forEach((w) => {
+      if (masteredIds.has(String(w.id))) return;
+      if (Test.reviewList.some((r) => String(r.id) === String(w.id))) merged.set(String(w.id), w);
+    });
+  }
+  Test.partialList.concat(Test.unknownList).forEach((w) => merged.set(String(w.id), w));
+  Test.reviewList = Array.from(merged.values());
+
   const note = forced ? "（30秒超過のため自動終了）" : "";
   const today = new Date().toISOString();
   db.put(STORE_TESTS, {
@@ -798,10 +842,11 @@ function finishTest(forced) {
     date: today,
     total: Test.seq.length,
     results: Test.results,
+    mode: Test.filter,
   });
 
   updateDeckAvg().then(() => {
-    App.currentWords = db.getAllByIndex(STORE_WORDS, "deckId", App.currentDeck.id).then((ws) => {
+    db.getAllByIndex(STORE_WORDS, "deckId", App.currentDeck.id).then((ws) => {
       App.currentWords = ws;
       renderWordList();
       renderDeckStats();
@@ -824,23 +869,36 @@ function renderSummary(note) {
   $("testSummary").classList.remove("hidden");
   const n = Test.results.length;
   const known = Test.results.filter((r) => r.result === "known").length;
-  const partial = Test.partialList.length;
-  const unknown = Test.unknownList.length;
+  const partial = Test.partialList;   // 配列（単語オブジェクト）
+  const unknown = Test.unknownList;   // 配列（単語オブジェクト）
+  const reviewCount = Test.reviewList.length;
   let html = `<h3>テスト結果${note ? " " + esc(note) : ""}</h3>
     <div class="summary-grid">
       <div class="summary-stat"><b>${n}</b><span>出題</span></div>
       <div class="summary-stat good"><b>${known}</b><span>わかった</span></div>
-      <div class="summary-stat mid"><b>${partial}</b><span>一部</span></div>
-      <div class="summary-stat bad"><b>${unknown}</b><span>わからなかった</span></div>
+      <div class="summary-stat mid"><b>${partial.length}</b><span>一部</span></div>
+      <div class="summary-stat bad"><b>${unknown.length}</b><span>わからなかった</span></div>
     </div>`;
-  if (partial) {
-    html += `<div class="summary-section"><h4>一部だけわかった（${partial}）</h4><ul>${partial.map((w) => `<li><b>${esc(w.term)}</b> — ${esc(w.meaning)}</li>`).join("")}</ul></div>`;
+  if (partial.length) {
+    html += `<div class="summary-section"><h4>一部だけわかった（${partial.length}）</h4><ul>${partial.map((w) => `<li><b>${esc(w.term)}</b> — ${esc(w.meaning)}</li>`).join("")}</ul></div>`;
   }
-  if (unknown) {
-    html += `<div class="summary-section"><h4>わからなかった（${unknown}）</h4><ul>${unknown.map((w) => `<li><b>${esc(w.term)}</b> — ${esc(w.meaning)}</li>`).join("")}</ul></div>`;
+  if (unknown.length) {
+    html += `<div class="summary-section"><h4>わからなかった（${unknown.length}）</h4><ul>${unknown.map((w) => `<li><b>${esc(w.term)}</b> — ${esc(w.meaning)}</li>`).join("")}</ul></div>`;
+  }
+  if (reviewCount) {
+    html += `<div class="button-row"><button id="startReviewButton" class="primary-button" type="button">できなかった単語を復習する（${reviewCount}語）</button></div>`;
   }
   html += `<p class="muted">一覧タブからスコアを確認できます。</p>`;
   $("testSummary").innerHTML = html;
+
+  const reviewBtn = $("startReviewButton");
+  if (reviewBtn) {
+    reviewBtn.addEventListener("click", () => {
+      $("testModeSelect").value = "review";
+      switchPanel(false);
+      startTest();
+    });
+  }
 }
 
 /* -------------------------------------------------------------------------
