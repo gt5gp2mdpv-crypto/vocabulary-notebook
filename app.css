@@ -472,6 +472,89 @@ p {
 
 .miss-item.bad b { color: var(--red); }
 .miss-item.mid b { color: var(--amber); }
+.miss-item.total b { color: var(--text); font-size: 15px; }
+.miss-item.total { background: var(--surface); border-color: var(--line); }
+
+/* テスト中の一時停止オーバーレイ */
+.test-card.is-paused {
+  position: relative;
+}
+
+.test-card.is-paused::after {
+  content: "一時停止中";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(247, 248, 251, 0.78);
+  backdrop-filter: blur(2px);
+  border-radius: 8px;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.test-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ===== 学習時間 ===== */
+.study-time-display {
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 24px 14px;
+  text-align: center;
+}
+
+.study-time-display b {
+  font-size: 40px;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.study-time-display .muted {
+  font-size: 13px;
+}
+
+.study-history-head {
+  margin-top: 22px;
+}
+
+.study-history {
+  display: grid;
+  gap: 8px;
+}
+
+.study-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.study-history-item .study-history-date {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.study-history-item b {
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
 
 .term-button {
   width: 100%;

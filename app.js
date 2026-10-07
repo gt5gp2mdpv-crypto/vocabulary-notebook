@@ -26,6 +26,14 @@ const SCORE_INIT = 1.0;
 const TIME_OPEN_LIMIT = 15; // 1単語の開放制限時間
 const TIME_FORCE_QUIT = 30; // これを超えたらテスト自体を強制終了
 
+// ミス強制終了（「わからなかった」＋「一部だけわかった」の合計がこの回数に達したら終了）
+const MISS_LIMIT = 10;
+
+// 学習時間（ストップウォッチ）
+const STUDY_META_KEY = "studyTime";   // metaストアの保存キー
+const STUDY_HISTORY_MAX = 7;          // 履歴として保持する日数
+const STUDY_FLUSH_INTERVAL = 30;      // 秒ごとにIndexedDBへ保存
+
 const ENC_UTF8 = "utf-8";
 const ENC_SHIFT_JIS = "shift-jis";
 
@@ -44,6 +52,17 @@ function clamp(n, min, max) {
 
 function round2(n) {
   return Math.round(n * 100) / 100;
+}
+
+// 時間（ミリ秒）を「X時間Y分Z秒」形式に整形
+function formatDuration(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return h + "時間" + m + "分" + s + "秒";
+  if (m > 0) return m + "分" + s + "秒";
+  return s + "秒";
 }
 
 function esc(s) {
@@ -181,7 +200,7 @@ const App = {
 /* -------------------------------------------------------------------------
  * 画面遷移
  * ------------------------------------------------------------------------- */
-const SCREENS = { home: "homeScreen", deck: "deckScreen", backup: "backupScreen" };
+const SCREENS = { home: "homeScreen", deck: "deckScreen", backup: "backupScreen", study: "studyScreen" };
 
 function showScreen(name) {
   Object.values(SCREENS).forEach((id) => $(id).classList.remove("active"));
@@ -203,6 +222,11 @@ function showScreen(name) {
   } else if (name === "backup") {
     label.textContent = "設定";
     title.textContent = "バックアップ / 設定";
+    $("openMenuButton").classList.remove("hidden");
+    backBtn.classList.remove("hidden");
+  } else if (name === "study") {
+    label.textContent = "Study";
+    title.textContent = "学習時間";
     $("openMenuButton").classList.remove("hidden");
     backBtn.classList.remove("hidden");
   }
@@ -583,6 +607,7 @@ async function exportBackup() {
   const decks = await db.getAll(STORE_DECKS);
   const words = await db.getAll(STORE_WORDS);
   const tests = await db.getAll(STORE_TESTS);
+  const meta = await db.getAll(STORE_META); // 学習時間などのメタ情報を含める
   const payload = {
     app: "vocab-pwa",
     backupVersion: BACKUP_VERSION,
@@ -590,6 +615,7 @@ async function exportBackup() {
     decks,
     words,
     tests,
+    meta,
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -628,12 +654,140 @@ async function restoreBackup(file) {
   const decks = data.decks || [];
   const words = data.words || [];
   const tests = data.tests || [];
+  const meta = data.meta || []; // 旧バージョンのバックアップには meta がないため || [] で互換維持
   for (const item of decks) await db.put(STORE_DECKS, item);
   for (const item of words) await db.put(STORE_WORDS, item);
   for (const item of tests) await db.put(STORE_TESTS, item);
+  for (const item of meta) await db.put(STORE_META, item);
 
   await loadDecks();
   showToast(`復元しました（単語帳${decks.length}件 / 単語${words.length}語）`);
+}
+
+/* -------------------------------------------------------------------------
+ * 学習時間（ストップウォッチ）
+ * - アプリをフォアグラウンドで開いている間のみ計測する
+ * - 毎日0時にリセット（日付が変わったら保存して0から計測し直す）
+ * - 30秒ごと、および画面が非表示/クローズされる直前にIndexedDBへ保存する
+ * ------------------------------------------------------------------------- */
+const StudyTimer = {
+  date: "",        // 現在計測中の日付キー（YYYY-M-D）
+  ms: 0,           // 当日の累積ミリ秒（メモリ上）
+  history: [],     // 過去の記録 [{ date, ms }] 直近7日
+  running: false,
+  lastTickAt: 0,
+  tickId: null,    // 1秒毎の加算タイマー
+  flushId: null,   // 定期保存タイマー
+
+  // IndexedDBから復元して開始
+  async init() {
+    let rec = null;
+    try {
+      rec = await db.get(STORE_META, STUDY_META_KEY);
+    } catch (e) {
+      console.warn("学習時間の読み込みに失敗しました:", e);
+    }
+    this.date = rec && rec.date ? rec.date : todayKey();
+    this.ms = rec && typeof rec.ms === "number" ? rec.ms : 0;
+    this.history = rec && Array.isArray(rec.history) ? rec.history : [];
+
+    // 前回終了時から日付が変わっていたらリセット（0時を跨いだ場合もここで捕捉）
+    if (this.date !== todayKey()) {
+      this.rollDate();
+    }
+
+    this.start();
+  },
+
+  // フォアグラウンド表示中なら計測開始
+  start() {
+    if (this.running) return;
+    if (document.visibilityState !== "visible") return;
+    this.running = true;
+    this.lastTickAt = Date.now();
+    this.tickId = setInterval(() => this.tick(), 1000);
+    this.flushId = setInterval(() => this.flush(), STUDY_FLUSH_INTERVAL * 1000);
+  },
+
+  // 計測停止（バックグラウンド/画面ロック時）。停止前に保存する。
+  stop() {
+    if (!this.running) return;
+    this.tick();
+    this.running = false;
+    clearInterval(this.tickId);
+    clearInterval(this.flushId);
+    this.tickId = null;
+    this.flushId = null;
+    this.flush();
+  },
+
+  // 経過時間を加算し、日付ローリングをチェック
+  tick() {
+    const now = Date.now();
+    if (this.running) {
+      this.ms += Math.max(0, now - this.lastTickAt);
+    }
+    this.lastTickAt = now;
+    if (this.date !== todayKey()) {
+      this.rollDate();
+      this.flush();
+    }
+    // 学習時間画面が開いていたら表示を更新
+    if (SCREENS.study && $(SCREENS.study).classList.contains("active")) {
+      this.renderToday();
+    }
+  },
+
+  // 日付が変わったら現在の記録を履歴へ退避し、0から計測し直す
+  rollDate() {
+    if (this.ms > 0) {
+      this.history.unshift({ date: this.date, ms: this.ms });
+      this.history = this.history.slice(0, STUDY_HISTORY_MAX);
+    }
+    this.date = todayKey();
+    this.ms = 0;
+  },
+
+  // IndexedDBへ保存（fire-and-forget）
+  flush() {
+    const record = {
+      key: STUDY_META_KEY,
+      date: this.date,
+      ms: this.ms,
+      history: this.history.slice(0, STUDY_HISTORY_MAX),
+      updatedAt: new Date().toISOString(),
+    };
+    db.put(STORE_META, record).catch((e) => console.warn("学習時間の保存に失敗しました:", e));
+  },
+
+  // 学習時間画面の「今日」表示を更新
+  renderToday() {
+    const el = $("studyTodayTime");
+    if (el) el.textContent = formatDuration(this.ms);
+    const d = $("studyDateLabel");
+    if (d) d.textContent = this.date;
+  },
+
+  // 学習時間画面全体を描画
+  render() {
+    this.renderToday();
+    const list = $("studyHistoryList");
+    if (!list) return;
+    const items = this.history.filter((h) => h && h.ms > 0);
+    if (!items.length) {
+      list.className = "study-history empty-state";
+      list.innerHTML = "まだ記録がありません。";
+      return;
+    }
+    list.className = "study-history";
+    list.innerHTML = items
+      .map((h) => `<div class="study-history-item"><span class="study-history-date">${esc(h.date)}</span><b>${formatDuration(h.ms)}</b></div>`)
+      .join("");
+  },
+};
+
+function renderStudyScreen() {
+  StudyTimer.render();
 }
 
 /* -------------------------------------------------------------------------
@@ -653,7 +807,9 @@ const Test = {
   reviewList: [],   // 前回のテストで「一部/わからなかった」単語（復習モード用）
   partialCount: 0,  // 「一部だけわかった」押下回数（通常テストのみカウント）
   unknownCount: 0,  // 「わからなかった」押下回数（通常テストのみカウント）
-  missLimit: 10,    // どちらかがこの回数に達したらテストを強制終了
+  missLimit: MISS_LIMIT, // 合計（わからなかった＋一部だけわかった）がこの回数に達したら強制終了
+  paused: false,    // 一時停止中か
+  pausedAt: 0       // 一時停止した時刻（performance.now基準）
 };
 
 function buildTestSequence() {
@@ -705,6 +861,7 @@ function startTest() {
     return;
   }
   Test.running = true;
+  setPaused(false); // 前回の停止状態が残っていないようにリセット
   switchPanel(false); // テスト開始時に必ずテスト画面へ切り替え
   Test.index = 0;
   Test.results = [];
@@ -712,6 +869,7 @@ function startTest() {
   Test.unknownList = [];
   Test.partialCount = 0;
   Test.unknownCount = 0;
+  updateMissCounter();
   buildTestSequence();
   if (!Test.seq.length) {
     Test.running = false;
@@ -740,15 +898,45 @@ function renderTestQuestion() {
 }
 
 // テスト中の「わからなかった／一部」カウンタ表示を更新
+// ミスは合計（わからなかった＋一部だけわかった）でカウントし、合計10回で強制終了する
 function updateMissCounter() {
   const counter = $("missCounter");
   if (!counter) return;
   const isReview = Test.filter === "review";
   counter.style.display = isReview ? "none" : "flex";
+  const total = Test.unknownCount + Test.partialCount;
+  const t = $("missTotalCount");
   const u = $("missUnknownCount");
   const p = $("missPartialCount");
+  if (t) t.textContent = String(total);
   if (u) u.textContent = String(Test.unknownCount);
   if (p) p.textContent = String(Test.partialCount);
+}
+
+/* 一時停止 / 再開
+ * ・タイマー（15秒表示・30秒強制終了）を完全停止する
+ * ・再開時に経過時間を補正し、続きから計測する
+ * ・一時停止中は単語タップ・回答操作を無効化する
+ */
+function setPaused(paused) {
+  if (!Test.running) return;
+  if (paused && !Test.paused) {
+    Test.paused = true;
+    Test.pausedAt = performance.now();
+    stopTimer();
+    const p = $("pauseTestButton");
+    if (p) p.textContent = "▶ 再開";
+    $("testRunning").classList.add("is-paused");
+  } else if (!paused && Test.paused) {
+    const dur = performance.now() - Test.pausedAt;
+    Test.startTime += dur; // 停止時間ぶんだけ開始時刻をずらして経過時間を補正
+    Test.paused = false;
+    Test.pausedAt = 0;
+    const p = $("pauseTestButton");
+    if (p) p.textContent = "⏸ 一時停止";
+    $("testRunning").classList.remove("is-paused");
+    startTimer(); // 補正後の startTime で続きから再開
+  }
 }
 
 function startTimer() {
@@ -782,6 +970,7 @@ function stopTimer() {
 
 function revealAnswer() {
   if (Test.revealed) return;
+  if (Test.paused) return; // 一時停止中は操作不可
   Test.revealed = true;
   $("answerPanel").classList.remove("hidden");
 }
@@ -791,6 +980,7 @@ function revealAnswer() {
  * ------------------------------------------------------------------------- */
 function onAnswer(result) {
   if (!Test.running || !Test.revealed) return;
+  if (Test.paused) return; // 一時停止中は操作不可
   const item = Test.seq[Test.index];
   const elapsed = item.elapsed;
   Test.results.push({ wordId: item.word.id, result, elapsed });
@@ -805,11 +995,12 @@ function onAnswer(result) {
   $("revealButton").disabled = true;
 
   // 通常テスト（復習以外）では「一部」「わからなかった」の押下回数をカウントし、
-  // どちらかが missLimit(10) 回に達したらその回答を記録した上でテストを強制終了する
+  // 合計が missLimit(10) 回に達したらその回答を記録した上でテストを強制終了する
   if (Test.filter !== "review" && (result === "partial" || result === "unknown")) {
     if (result === "partial") Test.partialCount++;
     else Test.unknownCount++;
-    if (Test.partialCount >= Test.missLimit || Test.unknownCount >= Test.missLimit) {
+    updateMissCounter();
+    if (Test.partialCount + Test.unknownCount >= Test.missLimit) {
       finishTest(true, "missLimit");
       return;
     }
@@ -864,13 +1055,17 @@ function applyScore(word, result, elapsed) {
 
 function finishTest(forced, reason) {
   stopTimer();
+  setPaused(false); // 一時停止中でも終了処理は行う（状態を戻してから）
   const wasRunning = Test.running;
   Test.running = false;
+  $("testRunning").classList.remove("is-paused");
+  const pauseBtn = $("pauseTestButton");
+  if (pauseBtn) pauseBtn.textContent = "⏸ 一時停止";
   $("testRunning").classList.add("hidden");
   if (!wasRunning) return;
 
   // 強制終了時、未回答の現項目があれば「わからなかった」として保存
-  // ただし missLimit(10回到達)による終了の場合は、10回目の回答は既に記録済みなのでスキップ
+  // ただし missLimit（ミス合計10回到達）による終了の場合は、10回目の回答は既に記録済みなのでスキップ
   if (forced && reason !== "missLimit" && Test.index < Test.seq.length) {
     const item = Test.seq[Test.index];
     applyScore(item.word, "unknown", TIME_FORCE_QUIT);
@@ -898,7 +1093,7 @@ function finishTest(forced, reason) {
   let note = "";
   if (forced) {
     note = reason === "missLimit"
-      ? "（わからなかった・一部だけわかったが10回に達したため自動終了）"
+      ? "（わからなかった・一部だけわかったの合計が10回に達したため自動終了）"
       : "（30秒超過のため自動終了）";
   }
   const today = new Date().toISOString();
@@ -994,6 +1189,12 @@ function bindGlobalEvents() {
     loadDecks();
   });
   $("menuBackup").addEventListener("click", () => { closeMenu(true); showScreen("backup"); });
+  $("menuStudyTime").addEventListener("click", () => {
+    closeMenu(true);
+    if (Test.running) finishTest(false); // テスト中に離脱したら終了処理
+    showScreen("study");
+    renderStudyScreen();
+  });
   window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(true); });
 
   // 戻る
@@ -1030,6 +1231,10 @@ function bindGlobalEvents() {
   $("finishTestButton").addEventListener("click", () => {
     if (confirm("テストを終了しますか？")) finishTest(false);
   });
+  $("pauseTestButton").addEventListener("click", () => {
+    if (!Test.running) return;
+    setPaused(!Test.paused);
+  });
   document.querySelectorAll(".answer-button").forEach((btn) => {
     btn.addEventListener("click", () => onAnswer(btn.dataset.result));
   });
@@ -1059,6 +1264,16 @@ async function init() {
 
   showScreen("home");
   await loadDecks();
+
+  // 学習時間ストップウォッチを開始（フォアグラウンド表示中のみ計測）
+  StudyTimer.init();
+
+  // バックグラウンド/画面ロック中は計測を止め、復帰時に再開する
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") StudyTimer.start();
+    else StudyTimer.stop();
+  });
+  window.addEventListener("pagehide", () => StudyTimer.stop());
 
   // Service Worker 登録（オフライン対応・更新配信）
   if ("serviceWorker" in navigator) {

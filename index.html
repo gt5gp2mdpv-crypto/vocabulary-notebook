@@ -38,6 +38,7 @@
           CSVを追加
         </label>
         <button class="drawer-item" id="menuBackup" type="button">バックアップ / 設定</button>
+        <button class="drawer-item" id="menuStudyTime" type="button">学習時間</button>
       </div>
     </nav>
 
@@ -109,12 +110,16 @@
               <div id="timerText" class="timer-text">15.0秒</div>
             </div>
             <div id="missCounter" class="miss-counter">
-              <span class="miss-item bad">わからなかった: <b id="missUnknownCount">0</b>/<span class="miss-limit">10</span></span>
-              <span class="miss-item mid">一部だけわかった: <b id="missPartialCount">0</b>/<span class="miss-limit">10</span></span>
+              <span class="miss-item total">ミス計: <b id="missTotalCount">0</b>/<span class="miss-limit">10</span></span>
+              <span class="miss-item bad">わからなかった: <b id="missUnknownCount">0</b></span>
+              <span class="miss-item mid">一部だけわかった: <b id="missPartialCount">0</b></span>
             </div>
             <div class="test-meta">
               <span id="testProgress">1 / 1</span>
-              <button id="finishTestButton" class="ghost-button danger" type="button">終了</button>
+              <div class="test-actions">
+                <button id="pauseTestButton" class="ghost-button" type="button">⏸ 一時停止</button>
+                <button id="finishTestButton" class="ghost-button danger" type="button">終了</button>
+              </div>
             </div>
             <button id="revealButton" class="term-button" type="button">
               <span id="testTerm"></span>
@@ -144,6 +149,24 @@
               <input id="restoreInput" type="file" accept="application/json,.json">
             </label>
           </div>
+        </section>
+      </section>
+
+      <section class="screen" id="studyScreen">
+        <section class="panel">
+          <div class="section-head">
+            <h2>今日の学習時間</h2>
+            <span id="studyDateLabel" class="muted"></span>
+          </div>
+          <div class="study-time-display">
+            <b id="studyTodayTime">0分0秒</b>
+            <span class="muted">アプリをフォアグラウンドで開いている間のみ計測します（毎日0時にリセット）</span>
+          </div>
+          <div class="section-head study-history-head">
+            <h2>最近の記録</h2>
+            <span class="muted">直近7日</span>
+          </div>
+          <div id="studyHistoryList" class="study-history empty-state">まだ記録がありません。</div>
         </section>
       </section>
     </main>
